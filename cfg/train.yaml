@@ -1,0 +1,45 @@
+hydra:
+  run:
+    dir: ./outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}-${task.name}-${algo.name}
+  job:
+    chdir: true
+
+headless: true
+exp_name: ${oc.select:task.name,test}-${oc.select:algo.name,none}
+
+app:
+  headless: ${..headless}
+  enable_cameras: ${..eval_render}
+
+total_frames: 4000_000_000
+start_iter: 0
+eval_render: false
+save_interval: 150
+seed: 0
+checkpoint_path: null
+vecnorm: ${oc.select:algo.vecnorm,train}
+
+camera_follow: false
+
+train_record:
+  interval: 50
+  envs: 16
+  steps: 500
+  output_dir: train_records
+
+wandb:
+  name: ${..exp_name}/${now:%m-%d}_${now:%H-%M}
+  job_type: train
+  project: gentle_humanoid
+  mode: online # set to 'disabled' when debugging locally
+  tags: []
+  id: null
+  notes: null
+  settings:
+    http_proxy: null
+    https_proxy: null
+
+defaults:
+  - task: G1/G1_gentle
+  - algo: ppo_train
+  - _self_

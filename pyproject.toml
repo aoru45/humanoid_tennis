@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=67"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "active-adaptation"
+version = "0.0.0"
+description = "Whole-body motion tracking training and evaluation pipeline"
+readme = "README.md"
+requires-python = "==3.10.*"
+authors = [{ name = "Axell" }]
+keywords = ["robotics", "reinforcement-learning", "motion-tracking"]
+dependencies = [
+  "hydra-core",
+  "omegaconf",
+  "mjlab==1.2.0",
+  "wandb",
+  "moviepy",
+  "imageio",
+  "xxhash",
+  "einops",
+  "termcolor",
+  "setproctitle",
+  "torch==2.10.0",
+  "tensordict==0.11.0",
+  "torchrl==0.11.1",
+  "torchvision==0.25.0",
+  "onnxscript",
+  "onnxruntime",
+  "tqdm",
+  "matplotlib",
+  "numpy",
+  "h5py",
+  "scipy",
+  "markupsafe==2.1.5",
+]
+
+[tool.setuptools.packages.find]
+include = ["active_adaptation", "active_adaptation.*"]
+
+# uv package index configuration; keeps PyPI as default fallback.
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu128"
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com"
+
+[tool.uv]
+# mjlab==1.1.1 depends on a pre-release warp-lang.
+prerelease = "allow"
+# Allow resolving a package from later indexes when an earlier index has
+# incompatible versions.
+index-strategy = "unsafe-best-match"

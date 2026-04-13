@@ -1,0 +1,25 @@
+# @package _global_
+
+defaults:
+  - override /algo: ppo_finetune
+
+algo:
+  init_noise_scale: 1.0
+  init_noise_scale_overrides:
+    ".*waist.*": 1.5
+    ".*wrist.*": 1.0
+    ".*shoulder.*": 1.2
+    ".*elbow.*": 1.2
+    ".*knee.*": 1.5
+    ".*hip.*": 1.5
+    ".*ankle.*": 1.0
+  load_noise_scale: null
+
+task:
+  student_train: true
+  reward:
+    loco:
+      action_rate_l2:     {weight: 0.1, enabled: true}
+      joint_acc_l2:       {weight: 5.0e-7, enabled: true, joint_names: .*}
+
+total_frames: 4000_000_000
