@@ -96,6 +96,12 @@ observation:
     joint_vel_history:         {history_steps: [0, 1, 2, 3, 4, 8, 12, 16, 20], noise_std: 0.5}
 
     prev_actions:   {steps: 8}
+  pulse_policy:
+    root_linvel_b_history:     {history_steps: [0, 1, 2, 3, 4, 8, 12, 16, 20], noise_std: 0.0}
+    root_angvel_b_history:     {history_steps: [0, 1, 2, 3, 4, 8, 12, 16, 20], noise_std: 0.0}
+    projected_gravity_history: {history_steps: [0, 1, 2, 3, 4, 8, 12, 16, 20], noise_std: 0.0, bias_noise_std: 0.0}
+    joint_pos_history:         {history_steps: [0, 1, 2, 3, 4, 8, 12, 16, 20], noise_std: 0.0}
+    joint_vel_history:         {history_steps: [0, 1, 2, 3, 4, 8, 12, 16, 20], noise_std: 0.0}
   priv:
     # tracking
     target_joint_pos_obs: {}

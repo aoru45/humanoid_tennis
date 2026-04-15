@@ -1,0 +1,25 @@
+# @package _global_
+
+defaults:
+  - override /algo: ppo_pulse
+
+task:
+  student_train: true
+
+algo:
+  in_keys: [policy, pulse_policy, priv, priv_critic]
+  teacher_checkpoint_path: null
+  pulse_epochs: 2
+  pulse_latent_dim: 32
+  pulse_kl_coef_start: 5.0e-3
+  pulse_kl_coef_end: 1.0e-3
+  pulse_rollout_source: posterior
+  pulse_regu_coef: 0.05
+  pulse_kl_anneal_start: 0.3
+  pulse_kl_anneal_end: 1.0
+  pulse_use_temporal_reg: true
+  pulse_posterior_hidden_dims: [1024, 512, 512]
+  pulse_prior_hidden_dims: [1024, 512, 512]
+  pulse_decoder_hidden_dims: [1024, 512, 512]
+
+total_frames: 1000_000_000

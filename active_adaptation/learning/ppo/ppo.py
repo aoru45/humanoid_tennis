@@ -33,6 +33,32 @@ import functools
 
 __all__ = ["PPOPolicy", "PPOConfig"]
 
+PULSE_PRIOR_OBS_KEY = "pulse_policy"
+
+
+class Split(nn.Module):
+    def __init__(self, split_size: int):
+        super().__init__()
+        self.split_size = split_size
+
+    def forward(self, x):
+        return x[..., :self.split_size], x[..., self.split_size:]
+
+
+class GaussianSampler(nn.Module):
+    def __init__(self, temp: float = 1.0):
+        super().__init__()
+        self.temp = temp
+
+    def forward(self, mu, logvar):
+        std = torch.exp(0.5 * logvar) * self.temp
+        return mu + torch.randn_like(std) * std
+
+
+class IdentityAction(nn.Module):
+    def forward(self, x):
+        return x
+
 # ------------------------------------------------------------------------------------------------ #
 # 1. Config
 # ------------------------------------------------------------------------------------------------ #
@@ -64,12 +90,30 @@ class PPOConfig:
 
     # distillation
     reg_lambda: float = 0.2  # weight of priv-feature alignment
+    ############################## PULSE ##########################
+    teacher_checkpoint_path: Union[str, None] = None
+    pulse_epochs: int = 2
+    pulse_latent_dim: int = 32
+    pulse_kl_coef_start: float = 1.0e-2
+    pulse_kl_coef_end: float = 1.0e-3
+    pulse_regu_coef: float = 0.05
+    pulse_kl_anneal_start: float = 0.5
+    pulse_kl_anneal_end: float = 1.0
+    pulse_use_temporal_reg: bool = True
+    pulse_logvar_min: float = -5.0
+    pulse_logvar_max: float = 2.0
+    pulse_prior_temp: float = 1.0
+    pulse_rollout_source: str = "posterior"  # prior | posterior
+    pulse_posterior_hidden_dims: List[int] = field(default_factory=lambda: [1024, 512, 512])
+    pulse_prior_hidden_dims: List[int] = field(default_factory=lambda: [1024, 512, 512])
+    pulse_decoder_hidden_dims: List[int] = field(default_factory=lambda: [1024, 512, 512])
+    ############################## PULSE ##########################
     # misc
     layer_norm: Union[str, None] = "before"
     value_norm: bool = False
 
     # phase switch
-    phase: str = "train"  # train | finetune | adapt
+    phase: str = "train"  # train | finetune | adapt | pulse
     vecnorm: Union[str, None] = None
     symmetry_enabled: bool = True
 
@@ -90,6 +134,7 @@ cs = ConfigStore.instance()
 cs.store("ppo_train", node=PPOConfig(phase="train", vecnorm="train", entropy_coef_start=0.01, entropy_coef_end=0.0025), group="algo")
 cs.store("ppo_adapt", node=PPOConfig(phase="adapt", vecnorm="eval", train_every=16), group="algo")
 cs.store("ppo_finetune", node=PPOConfig(phase="finetune", vecnorm="eval", lr=1e-4, entropy_coef_start=0.0025, entropy_coef_end=0.0005), group="algo")
+cs.store("ppo_pulse", node=PPOConfig(phase="pulse", vecnorm="eval", train_every=16), group="algo")
 
 class PPOPolicy(TensorDictModuleBase):
     def __init__(
@@ -105,7 +150,7 @@ class PPOPolicy(TensorDictModuleBase):
         self.cfg = cfg
         self.device = device
         self.observation_spec = observation_spec
-        assert cfg.phase in {"train", "finetune", "adapt"}
+        assert cfg.phase in {"train", "finetune", "adapt", "pulse"}
 
         self.entropy_coef = cfg.entropy_coef_start
         self.clip_param = cfg.clip_param
@@ -116,6 +161,7 @@ class PPOPolicy(TensorDictModuleBase):
         self._init_noise_scale_max = torch.tensor(init_noise_scale, device=device, dtype=torch.float32)
         self.gae = GAE(0.99, 0.95)
         self.reg_lambda = 0.0  # will be annealed
+        self.pulse_kl_weight = float(self.cfg.pulse_kl_coef_start)
         self.num_minibatches = cfg.num_minibatches
         self.progress = 0.0
         self.current_lr = cfg.lr
@@ -164,6 +210,66 @@ class PPOPolicy(TensorDictModuleBase):
         self.actor_teacher = build_actor(actor_in_keys_train)
         self.actor_student = build_actor(actor_in_keys_adapt)
 
+        # --------------------------------------------------------------------- pulse modules
+        self.pulse_posterior = Seq(
+            CatTensors([OBS_KEY, "priv_feature"], "_pulse_post_inp", del_keys=False, sort=False),
+            Mod(
+                nn.Sequential(
+                    make_mlp(self.cfg.pulse_posterior_hidden_dims),
+                    nn.LazyLinear(self.cfg.pulse_latent_dim * 2),
+                ),
+                ["_pulse_post_inp"],
+                ["_pulse_post_stats"],
+            ),
+            Mod(
+                Split(self.cfg.pulse_latent_dim),
+                ["_pulse_post_stats"],
+                ["pulse_post_mu", "pulse_post_logvar"],
+            ),
+        ).to(device)
+        self.pulse_prior = Seq(
+            CatTensors([PULSE_PRIOR_OBS_KEY], "_pulse_prior_inp", del_keys=False, sort=False),
+            Mod(
+                nn.Sequential(
+                    make_mlp(self.cfg.pulse_prior_hidden_dims),
+                    nn.LazyLinear(self.cfg.pulse_latent_dim * 2),
+                ),
+                ["_pulse_prior_inp"],
+                ["_pulse_prior_stats"],
+            ),
+            Mod(
+                Split(self.cfg.pulse_latent_dim),
+                ["_pulse_prior_stats"],
+                ["pulse_prior_mu", "pulse_prior_logvar"],
+            ),
+        ).to(device)
+        self.pulse_decoder = Seq(
+            CatTensors([PULSE_PRIOR_OBS_KEY, "pulse_z"], "_pulse_decoder_inp", del_keys=False, sort=False),
+            Mod(
+                nn.Sequential(
+                    make_mlp(self.cfg.pulse_decoder_hidden_dims),
+                    nn.LazyLinear(self.action_dim),
+                ),
+                ["_pulse_decoder_inp"],
+                ["pulse_action"],
+            ),
+        ).to(device)
+        self.pulse_prior_sampler = Mod(
+            GaussianSampler(self.cfg.pulse_prior_temp),
+            ["pulse_prior_mu", "pulse_prior_logvar"],
+            ["pulse_z"],
+        ).to(device)
+        self.pulse_post_sampler = Mod(
+            GaussianSampler(1.0),
+            ["pulse_post_mu", "pulse_post_logvar"],
+            ["pulse_z"],
+        ).to(device)
+        self.pulse_action_head = Mod(
+            IdentityAction(),
+            ["pulse_action"],
+            [ACTION_KEY],
+        ).to(device)
+
         # ---------------------------------------------------------------------------- critic (shared)
         self.critic = Seq(
             CatTensors([OBS_KEY, OBS_PRIV_KEY, CRITIC_PRIV_KEY], "_critic_inp", del_keys=False),
@@ -177,6 +283,13 @@ class PPOPolicy(TensorDictModuleBase):
         self.adapt_module(fake_td)
         self.actor_teacher(fake_td)
         self.actor_student(fake_td)
+        fake_td["pulse_z"] = torch.zeros(*fake_td[OBS_KEY].shape[:-1], self.cfg.pulse_latent_dim, device=device)
+        self.pulse_posterior(fake_td)
+        self.pulse_prior(fake_td)
+        self.pulse_prior_sampler(fake_td)
+        self.pulse_post_sampler(fake_td)
+        self.pulse_decoder(fake_td)
+        self.pulse_action_head(fake_td)
         self.critic(fake_td)
 
         # init weights (orthogonal for MLPS/linear)
@@ -204,6 +317,12 @@ class PPOPolicy(TensorDictModuleBase):
         )
         self.opt_critic = torch.optim.Adam(self.critic.parameters(), lr=cfg.lr)
         self.opt_estimator = torch.optim.Adam(self.adapt_module.parameters(), lr=cfg.lr)
+        self.opt_pulse = torch.optim.Adam(
+            list(self.pulse_posterior.parameters())
+            + list(self.pulse_prior.parameters())
+            + list(self.pulse_decoder.parameters()),
+            lr=cfg.lr,
+        )
 
         self.update_teacher = functools.partial(
             self._update,
@@ -257,6 +376,9 @@ class PPOPolicy(TensorDictModuleBase):
         self.encoder_priv  = DDP(self.encoder_priv,  **ddp_kwargs)
         self.critic        = DDP(self.critic,        **ddp_kwargs)
         self.adapt_module  = DDP(self.adapt_module,  **ddp_kwargs)
+        self.pulse_posterior = DDP(self.pulse_posterior, **ddp_kwargs)
+        self.pulse_prior = DDP(self.pulse_prior, **ddp_kwargs)
+        self.pulse_decoder = DDP(self.pulse_decoder, **ddp_kwargs)
 
     def broadcast_parameters(self, extra_modules=[]):
         if self.num_updates % 32 == 0:
@@ -312,6 +434,9 @@ class PPOPolicy(TensorDictModuleBase):
 
     def get_rollout_policy(self, mode: str = "train"):
         modules = []
+        if mode == "pulse_random":
+            modules += [self.pulse_prior, self.pulse_prior_sampler, self.pulse_decoder, self.pulse_action_head]
+            return Seq(*modules)
         if self.cfg.phase == "train":
             modules += [self.encoder_priv, self.actor_teacher]
         elif self.cfg.phase == "finetune":
@@ -320,6 +445,14 @@ class PPOPolicy(TensorDictModuleBase):
         elif self.cfg.phase == "adapt":
             modules += [self.adapt_module]
             modules += [self.actor_student]
+        elif self.cfg.phase == "pulse":
+            source = str(getattr(self.cfg, "pulse_rollout_source", "posterior")).lower()
+            if source == "prior":
+                modules += [self.pulse_prior, self.pulse_prior_sampler, self.pulse_decoder, self.pulse_action_head]
+            elif source == "posterior":
+                modules += [self.encoder_priv, self.pulse_posterior, self.pulse_post_sampler, self.pulse_decoder, self.pulse_action_head]
+            else:
+                raise ValueError(f"Invalid pulse_rollout_source='{source}', expected 'prior' or 'posterior'.")
 
         policy = Seq(*modules)
         return policy
@@ -330,6 +463,28 @@ class PPOPolicy(TensorDictModuleBase):
         end = self.cfg.entropy_coef_end
         # exponential decay from start to end based on progress in [0,1]
         self.entropy_coef = start * (end / start) ** progress
+        if self.cfg.phase == "pulse":
+            anneal_start = float(self.cfg.pulse_kl_anneal_start)
+            anneal_end = float(self.cfg.pulse_kl_anneal_end)
+            beta_start = float(self.cfg.pulse_kl_coef_start)
+            beta_end = float(self.cfg.pulse_kl_coef_end)
+            if anneal_end <= anneal_start:
+                self.pulse_kl_weight = beta_end
+            elif progress <= anneal_start:
+                self.pulse_kl_weight = beta_start
+            elif progress >= anneal_end:
+                self.pulse_kl_weight = beta_end
+            else:
+                ratio = (progress - anneal_start) / (anneal_end - anneal_start)
+                if beta_start > 0.0 and beta_end > 0.0:
+                    log_beta = torch.lerp(
+                        torch.tensor(beta_start, device=self.device).log(),
+                        torch.tensor(beta_end, device=self.device).log(),
+                        torch.tensor(ratio, device=self.device),
+                    )
+                    self.pulse_kl_weight = float(log_beta.exp().item())
+                else:
+                    self.pulse_kl_weight = float(beta_start + ratio * (beta_end - beta_start))
         self.progress = progress
 
     def train_op(self, td: TensorDict, vecnorm):
@@ -344,6 +499,8 @@ class PPOPolicy(TensorDictModuleBase):
                 info.update(self._ppo_update(td, self.update_student))
             else:
                 info.update(self._ppo_update(td, self.update_student_critic))
+        elif self.cfg.phase == "pulse":
+            info = self.train_pulse(td)
         else:  # adapt
             info = self.train_estimator(td)
         self.num_updates += 1
@@ -530,6 +687,15 @@ class PPOPolicy(TensorDictModuleBase):
 
         return {k: v.mean().item() for k, v in torch.stack(infos).items()}
 
+    def train_pulse(self, td):
+        infos = []
+
+        for _ in range(self.cfg.pulse_epochs):
+            for mb in make_batch(td, self.num_minibatches, self.cfg.train_every):
+                infos.append(TensorDict(self._update_pulse(mb), []))
+
+        return {k: v.mean().item() for k, v in torch.stack(infos).items()}
+
     def _update2(self, mb, adapt_module, opt_estimator):
         if self.use_symmetry_ppo:
             mb_sym = mb.clone()
@@ -556,6 +722,80 @@ class PPOPolicy(TensorDictModuleBase):
         opt_estimator.step()
 
         return {"adapt/estimator_loss": loss.detach()}
+
+    def _update_pulse(self, mb):
+        done = mb["next", "done"].clone() if ("next", "done") in mb.keys(True, True) else None
+        mb = mb.exclude("next")
+
+        with torch.no_grad():
+            self.encoder_priv(mb)
+            self.adapt_module(mb)
+            self.actor_teacher(mb)
+
+        teacher_action = mb["loc"].detach().clone()
+
+        self.pulse_posterior(mb)
+        self.pulse_prior(mb)
+
+        post_mu = mb["pulse_post_mu"]
+        post_logvar = mb["pulse_post_logvar"].clamp(self.cfg.pulse_logvar_min, self.cfg.pulse_logvar_max)
+        prior_mu = mb["pulse_prior_mu"]
+        prior_logvar = mb["pulse_prior_logvar"].clamp(self.cfg.pulse_logvar_min, self.cfg.pulse_logvar_max)
+
+        mb["pulse_post_logvar"] = post_logvar
+        mb["pulse_prior_logvar"] = prior_logvar
+
+        pulse_z = self._sample_gaussian(post_mu, post_logvar)
+        mb["pulse_z"] = pulse_z
+        self.pulse_decoder(mb)
+
+        valid = (~mb["is_init"]).float()
+        action_loss = torch.mean(
+            F.mse_loss(mb["pulse_action"], teacher_action, reduction="none") * valid
+        )
+
+        kl = self._diag_gaussian_kl(post_mu, post_logvar, prior_mu, prior_logvar)
+        kl_loss = torch.mean(kl * valid)
+
+        regu_loss = torch.zeros((), device=self.device)
+        if self.cfg.pulse_use_temporal_reg and post_mu.ndim >= 3:
+            regu_valid = (~mb["is_init"][:, 1:]) & (~mb["is_init"][:, :-1])
+            if done is not None:
+                regu_valid = regu_valid & (~done[:, :-1])
+            if regu_valid.any():
+                regu_valid = regu_valid.float()
+                regu_loss = torch.mean(
+                    torch.mean((post_mu[:, 1:] - post_mu[:, :-1]).square(), dim=-1, keepdim=True) * regu_valid
+                )
+
+        loss = action_loss + self.pulse_kl_weight * kl_loss + float(self.cfg.pulse_regu_coef) * regu_loss
+
+        self.opt_pulse.zero_grad()
+        loss.backward()
+        pulse_grad_norm = nn.utils.clip_grad_norm_(
+            list(self.pulse_posterior.parameters())
+            + list(self.pulse_prior.parameters())
+            + list(self.pulse_decoder.parameters()),
+            1.0,
+        )
+        self.opt_pulse.step()
+
+        with torch.no_grad():
+            post_std = torch.exp(0.5 * post_logvar)
+            prior_std = torch.exp(0.5 * prior_logvar)
+
+        return {
+            "pulse/loss": loss.detach(),
+            "pulse/action_loss": action_loss.detach(),
+            "pulse/kl_loss": kl_loss.detach(),
+            "pulse/regu_loss": regu_loss.detach(),
+            "pulse/kl_weight": torch.tensor(self.pulse_kl_weight, device=self.device),
+            "pulse/post_std_mean": post_std.mean().detach(),
+            "pulse/prior_std_mean": prior_std.mean().detach(),
+            "pulse/post_mu_norm": post_mu.norm(dim=-1).mean().detach(),
+            "pulse/prior_mu_norm": prior_mu.norm(dim=-1).mean().detach(),
+            "pulse/grad_norm": pulse_grad_norm.detach() if isinstance(pulse_grad_norm, torch.Tensor) else torch.tensor(pulse_grad_norm, device=self.device),
+        }
 
     @staticmethod
     @torch.compile
@@ -643,6 +883,8 @@ class PPOPolicy(TensorDictModuleBase):
 
     def load_state_dict(self, state_dict, strict=True):
         for n, m in self.named_children():
+            if n not in state_dict:
+                continue
             try:
                 if isinstance(m, DDP):
                     m.module.load_state_dict(state_dict.get(n, {}), strict=strict)
@@ -659,12 +901,53 @@ class PPOPolicy(TensorDictModuleBase):
             self.hard_copy_(self.actor_teacher, self.actor_student)
 
         meta = state_dict.get("_meta", {})
-        if state_dict["last_phase"] == self.cfg.phase:
+        if state_dict.get("last_phase") == self.cfg.phase:
             self.current_lr   = meta.get("current_lr", getattr(self, "current_lr", self.cfg.lr))
             self.entropy_coef = meta.get("entropy_coef", self.entropy_coef)
             self.reg_lambda   = meta.get("reg_lambda", self.reg_lambda)
             self.progress     = meta.get("progress", self.progress)
             self.num_updates  = meta.get("num_updates", self.num_updates)
+
+    def load_teacher_state_dict(self, state_dict, strict=True):
+        teacher_modules = ("encoder_priv", "actor_teacher")
+        for name in teacher_modules:
+            if name not in state_dict:
+                continue
+            module = getattr(self, name, None)
+            if module is None:
+                continue
+            try:
+                if isinstance(module, DDP):
+                    module.module.load_state_dict(state_dict[name], strict=strict)
+                else:
+                    module.load_state_dict(state_dict[name], strict=strict)
+            except Exception as exc:
+                warnings.warn(f"Failed to load teacher module {name}: {exc}")
+
+    def prepare_for_phase(self):
+        if self.cfg.phase != "pulse":
+            return
+        self._freeze_module(self.encoder_priv)
+        self._freeze_module(self.actor_teacher)
+        self._freeze_module(self.adapt_module)
+
+    @staticmethod
+    def _freeze_module(module):
+        base = module.module if isinstance(module, DDP) else module
+        base.requires_grad_(False)
+        base.eval()
+
+    @staticmethod
+    def _sample_gaussian(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        std = torch.exp(0.5 * logvar)
+        return mu + torch.randn_like(std) * std
+
+    @staticmethod
+    def _diag_gaussian_kl(mu_q: torch.Tensor, logvar_q: torch.Tensor, mu_p: torch.Tensor, logvar_p: torch.Tensor) -> torch.Tensor:
+        var_q = torch.exp(logvar_q)
+        var_p = torch.exp(logvar_p)
+        kl = logvar_p - logvar_q + (var_q + (mu_q - mu_p).square()) / var_p - 1.0
+        return 0.5 * kl.sum(dim=-1, keepdim=True)
 
     @staticmethod
     def soft_copy_(src_module: nn.Module, dst_module: nn.Module, tau: float):

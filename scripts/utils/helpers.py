@@ -171,10 +171,19 @@ def make_env_policy(cfg: DictConfig):
     else:
         state_dict = {}
 
+    teacher_checkpoint_path = cfg.algo.get("teacher_checkpoint_path", None)
+    if teacher_checkpoint_path is not None and aa.is_main_process():
+        teacher_checkpoint_path = parse_checkpoint_path(teacher_checkpoint_path, cfg.get("wandb", None))
+        aa.print(f"Loading teacher checkpoint from {teacher_checkpoint_path}")
+        teacher_state_dict = torch.load(teacher_checkpoint_path, weights_only=False)
+    else:
+        teacher_state_dict = {}
+
     if aa.is_distributed():
-        state_list = [state_dict]
+        state_list = [state_dict, teacher_state_dict]
         dist.broadcast_object_list(state_list, src=0)
         state_dict = state_list[0] or {}
+        teacher_state_dict = state_list[1] or {}
     aa.print("load checkpoint done")
     
     policy_in_keys = cfg.algo.get("in_keys", ["policy", "priv"])
@@ -252,6 +261,11 @@ def make_env_policy(cfg: DictConfig):
     if "policy" in state_dict.keys():
         print(colored("[Info]: Load policy from checkpoint.", "green"))
         policy.load_state_dict(state_dict["policy"])
+    if "policy" in teacher_state_dict.keys():
+        print(colored("[Info]: Load teacher-only modules from teacher checkpoint.", "green"))
+        policy.load_teacher_state_dict(teacher_state_dict["policy"])
+    if hasattr(policy, "prepare_for_phase"):
+        policy.prepare_for_phase()
     
     if cfg.checkpoint_path is not None:
         policy.broadcast_parameters([vecnorm])

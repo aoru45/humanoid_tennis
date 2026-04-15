@@ -66,7 +66,8 @@ def play(cfg):
         if isinstance(k, tuple) and k[0]=="stats"
     ]
     episode_stats = EpisodeStats(stats_keys, device=env.device)
-    policy = policy.get_rollout_policy("eval")
+    rollout_mode = cfg.get("rollout_mode", "eval")
+    policy = policy.get_rollout_policy(rollout_mode)
 
     td_ = env.reset()
     
