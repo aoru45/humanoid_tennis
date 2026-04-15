@@ -1,5 +1,5 @@
 import os
-from .humanoid import G1_CFG, G1_COL_FULL, G1_COL_FULL_SELF
+from .humanoid import G1_CFG, G1_COL_FULL, G1_COL_FULL_SELF, G1_COL_FULL_SELF_RACKET
 
 ASSET_PATH = os.path.dirname(__file__)
 
@@ -7,6 +7,8 @@ ROBOTS = {
     "g1": G1_CFG,
     "g1_col_full": G1_COL_FULL,
     "g1_col_full_self": G1_COL_FULL_SELF,
+    "g1_col_full_self_racket": G1_COL_FULL_SELF_RACKET,
+    "g1_racket": G1_COL_FULL_SELF_RACKET,
 }
 
 

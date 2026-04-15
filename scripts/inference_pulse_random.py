@@ -37,6 +37,7 @@ def main():
     parser.add_argument("--device", default="cuda:0", type=str)
     parser.add_argument("--num-envs", default=16, type=int)
     parser.add_argument("--temp", default=1.0, type=float)
+    parser.add_argument("--robot-name", default=None, type=str)
     args = parser.parse_args()
 
     cfg = load_cfg(args.cfg)
@@ -65,12 +66,16 @@ def main():
     cfg["task"]["command"]["gravity_terminate_thres"] = 0.0
     cfg["task"]["max_episode_length"] = int(1e9)
     cfg["task"]["sim"]["device"] = device
+    if args.robot_name:
+        cfg["task"]["robot"]["name"] = args.robot_name
 
     if "algo" not in cfg:
         cfg["algo"] = {}
     cfg["algo"]["pulse_prior_temp"] = float(args.temp)
 
     print(f"[INFO] device={device}, num_envs={args.num_envs}, pulse_prior_temp={args.temp}")
+    if args.robot_name:
+        print(f"[INFO] robot_name={args.robot_name}")
     print("[INFO] Rollout mode: pulse_random")
     print("[INFO] Press Ctrl+C to stop.")
     play(cfg)

@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import logging
+import re
 from typing import Union, TYPE_CHECKING, Dict, Tuple, cast
 from collections.abc import Mapping
 import warp as wp
@@ -309,6 +310,80 @@ class perturb_body_mass(Randomization):
         model = self.env.sim.model
         new_mass = self._default_mass * scale
         new_inertia = self._default_inertia * scale.unsqueeze(-1)
+        model.body_mass[:, self.global_body_ids] = new_mass
+        model.body_inertia[:, self.global_body_ids] = new_inertia
+        self.env.sim.recompute_constants(RecomputeLevel.set_const)
+
+        assert torch.allclose(model.body_mass[:, self.global_body_ids], new_mass)
+        assert torch.allclose(model.body_inertia[:, self.global_body_ids], new_inertia)
+
+
+class perturb_racket_mass(Randomization):
+    """Randomize racket body mass/inertia if the racket body exists on current robot asset.
+
+    This is intentionally no-op for non-racket robots to keep shared task configs usable.
+    """
+
+    def __init__(
+        self,
+        env,
+        body_name: str = "tennis_racket_mount",
+        scale_range: Tuple[float, float] = (0.8, 1.2),
+    ):
+        super().__init__(env)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.body_name = body_name
+
+        body_ids = [
+            i for i, name in enumerate(self.asset.body_names)
+            if re.fullmatch(body_name, name)
+        ]
+        body_names = [self.asset.body_names[i] for i in body_ids]
+        if len(body_ids) == 0:
+            self.enabled = False
+            logging.info(
+                f"Skip perturb_racket_mass: no body matched '{body_name}'."
+            )
+            return
+        if len(body_ids) != 1:
+            raise ValueError(
+                f"perturb_racket_mass expects exactly one body for '{body_name}', got {body_names}."
+            )
+
+        low, high = float(scale_range[0]), float(scale_range[1])
+        if low <= 0.0 or high <= 0.0:
+            raise ValueError(f"scale_range must be > 0, got {scale_range}.")
+        if high < low:
+            raise ValueError(f"scale_range must satisfy low <= high, got {scale_range}.")
+
+        self.enabled = True
+        self.scale_low = low
+        self.scale_high = high
+        self.body_names = body_names
+
+        self.ensure_model_fields_expanded("body_mass", "body_inertia")
+        self.ensure_recompute_fields_expanded(RecomputeLevel.set_const)
+
+        self.local_body_ids = torch.as_tensor(body_ids, device=self.device, dtype=torch.long)
+        self.global_body_ids = self.asset.indexing.body_ids[self.local_body_ids]
+
+        model = self.env.sim.model
+        self._default_mass = model.body_mass[:, self.global_body_ids].clone()
+        self._default_inertia = model.body_inertia[:, self.global_body_ids].clone()
+
+    def startup(self):
+        if not self.enabled:
+            return
+
+        logging.info(
+            f"Randomize racket mass of {self.body_names} upon startup, scale_range=[{self.scale_low:.3f}, {self.scale_high:.3f}]"
+        )
+
+        scale = sample_uniform((self.num_envs, 1), self.scale_low, self.scale_high, device=self.device)
+        model = self.env.sim.model
+        new_mass = self._default_mass * scale
+        new_inertia = self._default_inertia * scale.unsqueeze(-1)
+
         model.body_mass[:, self.global_body_ids] = new_mass
         model.body_inertia[:, self.global_body_ids] = new_inertia
         self.env.sim.recompute_constants(RecomputeLevel.set_const)

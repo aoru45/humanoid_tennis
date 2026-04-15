@@ -164,6 +164,9 @@ randomization:
   perturb_body_com:
     body_names: ["pelvis", "torso_link"]
     com_range: [-0.03, 0.03]
+  perturb_racket_mass:
+    body_name: "tennis_racket_mount"
+    scale_range: [0.8, 1.2]
   # perturb_body_mass:
   #   pelvis: [0.9, 1.1]
   #   torso_link: [0.9, 1.1]

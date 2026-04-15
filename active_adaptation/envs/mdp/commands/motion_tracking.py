@@ -990,7 +990,7 @@ class MotionTrackingCommand(Command):
             # get current root pos/rot from cache
             reward_pos = self.ts_root_pos_w[:, 0].clone()
             # roll forward the cache
-            self.ts_root_pos_w[:, :-1] = self.ts_root_pos_w[:, 1:]
+            self.ts_root_pos_w[:, :-1] = self.ts_root_pos_w[:, 1:].clone()
             # compute target root pos/rot at t+steps
             current_pos_t = self.asset.data.root_link_pos_w
             current_quat_t = self.asset.data.root_link_quat_w
