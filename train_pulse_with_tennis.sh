@@ -8,6 +8,31 @@ NUM_ENVS="${NUM_ENVS:-4096}"
 WANDB_ENTITY="${WANDB_ENTITY:-aoru45}"
 WANDB_PROJECT="${WANDB_PROJECT:-gentle_humanoid}"
 RUN_NAME="${RUN_NAME:-tracking-pulse-tennis-$(date +%m%d-%H%M)}"
+USE_RACKET="${USE_RACKET:-1}"
+ROBOT_NAME="${ROBOT_NAME:-}"
+
+USE_RACKET_NORM="$(printf '%s' "${USE_RACKET}" | tr '[:upper:]' '[:lower:]')"
+if [[ -z "${ROBOT_NAME}" ]]; then
+  case "${USE_RACKET_NORM}" in
+    1|true|yes|y|on)
+      ROBOT_NAME="g1_col_full_self_racket"
+      ;;
+    0|false|no|n|off|"")
+      ROBOT_NAME="g1_col_full_self"
+      ;;
+    *)
+      echo "[ERROR] Invalid USE_RACKET='${USE_RACKET}', expected 0/1 or true/false."
+      exit 1
+      ;;
+  esac
+fi
+
+RUN_NAME_SLUG="$(printf '%s' "${RUN_NAME}" | tr '[:space:]/' '__' | tr -cd '[:alnum:]_.-')"
+if [[ -z "${RUN_NAME_SLUG}" ]]; then
+  RUN_NAME_SLUG="run"
+fi
+DEFAULT_HYDRA_RUN_DIR="./outputs/\${now:%Y-%m-%d}/\${now:%H-%M-%S}-${RUN_NAME_SLUG}"
+HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-$DEFAULT_HYDRA_RUN_DIR}"
 
 # Stage-2 adapt checkpoint source.
 # This checkpoint already contains the teacher modules inherited from Stage-1
@@ -49,18 +74,22 @@ fi
 echo "[INFO] Launch pulse distillation with ${NPROC} GPUs, num_envs=${NUM_ENVS}"
 echo "[INFO] WandB entity=${WANDB_ENTITY}, project=${WANDB_PROJECT}, name=${RUN_NAME}"
 echo "[INFO] Stage-2 checkpoint source=${STAGE2_CKPT}"
+echo "[INFO] robot_name=${ROBOT_NAME} (USE_RACKET=${USE_RACKET})"
+echo "[INFO] hydra.run.dir=${HYDRA_RUN_DIR}"
 
 uv run torchrun --nproc_per_node="${NPROC}" scripts/train.py \
   task=G1/G1_tracking +exp=pulse \
+  "task.robot.name=${ROBOT_NAME}" \
   "checkpoint_path=${STAGE2_CKPT}" \
   'task.command.dataset.mem_paths=[lafan_all,amass_all,100style,amass_hard,real_vr,tennis]' \
   'task.command.dataset.path_weights=[0.25,0.25,0.25,0.05,0.05,0.15]' \
   "task.command.body_z_terminate_thres=0.35" \
   'task.command.body_z_terminate_patterns=["pelvis",".*ankle_roll.*"]' \
-  "task.action.max_delay=0" \
+  "task.action.max_delay=2" \
   "algo.pulse_kl_coef_start=2.0e-2" \
   "algo.pulse_kl_coef_end=5.0e-3" \
   "task.num_envs=${NUM_ENVS}" \
+  "hydra.run.dir=${HYDRA_RUN_DIR}" \
   wandb.mode=online \
   +wandb.entity="${WANDB_ENTITY}" \
   "wandb.project=${WANDB_PROJECT}" \
