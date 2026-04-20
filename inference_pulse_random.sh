@@ -7,8 +7,10 @@ DEVICE="${DEVICE:-cuda:2}"
 NUM_ENVS="${NUM_ENVS:-8}"
 PULSE_TEMP="${PULSE_TEMP:-1.0}"
 CFG_PATH="${CFG_PATH:-cfg/train.yaml}"
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-15/17-34-58-tracking-pulse-only-tennis-0415-1734/wandb/run-20260415_173529-b4bx1esr/files/checkpoint_2400.pt}"
-USE_RACKET="${USE_RACKET:-0}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-18/01-01-39-tracking-pulse-tennis-0418-0101/wandb/run-20260418_010213-fy4oipc6/files/checkpoint_final.pt}"
+
+#CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-17/23-05-53-tracking-pulse-only-tennis-0417-2305/wandb/run-20260417_230629-nxafmogr/files/checkpoint_final.pt}"
+USE_RACKET="${USE_RACKET:-1}"
 ROBOT_NAME="${ROBOT_NAME:-}"
 
 USE_RACKET_NORM="$(printf '%s' "${USE_RACKET}" | tr '[:upper:]' '[:lower:]')"

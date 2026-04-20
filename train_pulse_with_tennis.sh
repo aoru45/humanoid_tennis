@@ -42,7 +42,7 @@ HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-$DEFAULT_HYDRA_RUN_DIR}"
 #    STAGE2_CKPT="/abs/path/to/checkpoint_final.pt"
 # 2) WandB run reference example:
 #    STAGE2_CKPT="run:axell-wppr/gentle_humanoid/<run_id>"
-STAGE2_CKPT="${STAGE2_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-14/19-55-05-G1TRACKING-ppo/wandb/run-20260414_195537-lgsyzih4/files/checkpoint_final.pt}"
+STAGE2_CKPT="${STAGE2_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-15/19-26-41-tracking-stage1-tennis-0415-1926/wandb/run-20260415_192712-dih8z6j9/files/checkpoint_final.pt}"
 
 required=(
   "dataset/lafan_all/meta_motion.json"

@@ -32,6 +32,9 @@ wandb:
   job_type: train
   project: gentle_humanoid
   mode: online # set to 'disabled' when debugging locally
+  compact_metrics: true
+  include_env_extra: true
+  include_stats_ema: false
   tags: []
   id: null
   notes: null

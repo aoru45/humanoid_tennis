@@ -153,6 +153,7 @@ class MotionTrackingCommand(Command):
                 show_tracking_debug: bool = True,
                 show_reference_motion: bool = True,
                 reference_alpha: float = 0.55,
+                init_from_default_pose: bool = False,
                 debug_mode: bool = False,):
         super().__init__(env)
         
@@ -211,6 +212,7 @@ class MotionTrackingCommand(Command):
         self.reference_alpha = float(min(1.0, max(0.0, reference_alpha)))
         self._reference_ghost_logged = False
         self._reference_ghost_model = self._build_reference_ghost_model()
+        self.init_from_default_pose = bool(init_from_default_pose)
 
         # bodies for full‑body keypoint tracking
         self.keypoint_patterns = keypoint_patterns
@@ -410,6 +412,15 @@ class MotionTrackingCommand(Command):
 
         n = env_ids.shape[0]
 
+        if self.init_from_default_pose:
+            t[:] = 0
+            self.lengths[env_ids] = lengths
+            self.t[env_ids] = t
+            self.sample_init_default_pose(env_ids)
+            self.next_init_t[env_ids] = -1
+            self._reinit_requested[env_ids] = False
+            return None
+
         if self.debug_mode:
             t[:] = 0
         else:
@@ -440,6 +451,25 @@ class MotionTrackingCommand(Command):
         self.sample_init_robot(env_ids, motion)
         self.next_init_t[env_ids] = -1
         return None
+
+    def sample_init_default_pose(self, env_ids: Sequence[int]):
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if env_ids.numel() == 0:
+            return
+
+        init_root_state = self.asset.data.default_root_state[env_ids].clone()
+        init_joint_pos = self.asset.data.default_joint_pos[env_ids].clone()
+        init_joint_vel = self.asset.data.default_joint_vel[env_ids].clone()
+        env_origins = self.env.scene.env_origins[env_ids]
+
+        # Keep all envs at the same default local pose, translated by env origins.
+        init_root_state[:, :3] = env_origins + init_root_state[:, :3]
+        self.joint_pos_boot_protect[env_ids] = init_joint_pos
+
+        self.asset.write_root_state_to_sim(init_root_state, env_ids=env_ids)
+        self.asset.write_joint_position_to_sim(init_joint_pos, env_ids=env_ids)
+        self.asset.write_joint_velocity_to_sim(init_joint_vel, env_ids=env_ids)
+        self.asset.set_joint_position_target(init_joint_pos, env_ids=env_ids)
 
     def sample_init_robot(self, env_ids: Sequence[int], motion, lift_height: float = 0.04):
         # Get subsets for the current envs

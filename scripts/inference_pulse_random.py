@@ -61,6 +61,9 @@ def main():
     cfg["task"]["viewer"]["camera_tracking_enabled"] = False
     cfg["task"]["command"]["show_tracking_debug"] = False
     cfg["task"]["command"]["show_reference_motion"] = False
+    command_target = str(cfg["task"]["command"].get("_target_", ""))
+    if "motion_tracking" in command_target:
+        cfg["task"]["command"]["init_from_default_pose"] = True
     cfg["task"]["termination"] = {}
     cfg["task"]["command"]["body_z_terminate_thres"] = 0.0
     cfg["task"]["command"]["gravity_terminate_thres"] = 0.0
@@ -77,6 +80,8 @@ def main():
     if args.robot_name:
         print(f"[INFO] robot_name={args.robot_name}")
     print("[INFO] Rollout mode: pulse_random")
+    if "motion_tracking" in command_target:
+        print("[INFO] Init mode: default cfg pose for all envs (no dataset/random init pose)")
     print("[INFO] Press Ctrl+C to stop.")
     play(cfg)
 

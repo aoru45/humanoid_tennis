@@ -23,6 +23,11 @@ class SimpleEnv(_Env):
         from mjlab.scene import Scene
         from mjlab.sim.sim import Simulation
 
+        mjlab_dt = self.cfg.sim.get("mjlab_physics_dt", None)
+        if mjlab_dt is None:
+            mjlab_dt = self.cfg.sim.get("mujoco_physics_dt", None)
+        decimation_est = max(1, int(round(float(self.cfg.sim.step_dt) / float(mjlab_dt))))
+
         env_spacing = self.cfg.viewer.get("env_spacing", 2.5)
         scene_cfg = MJSceneCfg(num_envs=self.cfg.num_envs, env_spacing=env_spacing)
 
@@ -32,9 +37,28 @@ class SimpleEnv(_Env):
             num_envs=self.cfg.num_envs,
         )
 
-        from active_adaptation.assets import get_robot_cfg
+        from active_adaptation.assets import (
+            get_robot_cfg,
+            get_tennis_ball_cfg,
+            get_tennis_court_cfg,
+        )
 
         scene_cfg.entities["robot"] = get_robot_cfg(self.cfg.robot.name)
+        tennis_cfg = self.cfg.get("tennis", None)
+        if tennis_cfg is not None:
+            if bool(tennis_cfg.get("add_court", False)):
+                court_texture = str(tennis_cfg.get("court_texture", "green"))
+                net_height = float(tennis_cfg.get("net_height", 1.07))
+                net_collision_half_thickness = float(tennis_cfg.get("net_collision_half_thickness", 0.06))
+                enable_racket_court_collision = bool(tennis_cfg.get("racket_court_collision", False))
+                scene_cfg.entities["tennis_court"] = get_tennis_court_cfg(
+                    texture=court_texture,
+                    net_height=net_height,
+                    net_collision_half_thickness=net_collision_half_thickness,
+                    enable_racket_court_collision=enable_racket_court_collision,
+                )
+            if bool(tennis_cfg.get("add_ball", False)):
+                scene_cfg.entities["tennis_ball"] = get_tennis_ball_cfg()
 
         # contact_cfg = ContactSensorCfg(
         #     name="contact_forces",
@@ -64,11 +88,62 @@ class SimpleEnv(_Env):
             debug=False
         )
 
-        scene_cfg.sensors = (contact_cfg,)
+        sensors = [contact_cfg]
+        if (
+            tennis_cfg is not None
+            and bool(tennis_cfg.get("add_ball", False))
+            and bool(tennis_cfg.get("add_court", False))
+            and bool(tennis_cfg.get("enable_contact_sensors", True))
+        ):
+            racket_ball_sensor = ContactSensorCfg(
+                name="racket_ball_contact",
+                primary=ContactMatch(mode="geom", pattern="tennis_racket_collision", entity="robot"),
+                secondary=ContactMatch(mode="geom", pattern="tennis_ball_geom", entity="tennis_ball"),
+                fields=("found", "force"),
+                reduce="maxforce",
+                global_frame=False,
+                num_slots=1,
+                history_length=decimation_est,
+                debug=False,
+            )
+            ball_net_sensor = ContactSensorCfg(
+                name="ball_net_contact",
+                primary=ContactMatch(mode="geom", pattern="tennis_ball_geom", entity="tennis_ball"),
+                secondary=ContactMatch(mode="geom", pattern="tennis_net_collision", entity="tennis_court"),
+                fields=("found", "force"),
+                reduce="maxforce",
+                global_frame=False,
+                num_slots=1,
+                history_length=decimation_est,
+                debug=False,
+            )
+            ball_court_sensor = ContactSensorCfg(
+                name="ball_court_contact",
+                primary=ContactMatch(mode="geom", pattern="tennis_ball_geom", entity="tennis_ball"),
+                secondary=ContactMatch(mode="geom", pattern="tennis_court_ball_collision", entity="tennis_court"),
+                fields=("found", "force"),
+                reduce="maxforce",
+                global_frame=False,
+                num_slots=1,
+                history_length=decimation_est,
+                debug=False,
+            )
+            sensors.extend([racket_ball_sensor, ball_net_sensor, ball_court_sensor])
+            if bool(tennis_cfg.get("racket_court_collision", False)):
+                racket_court_sensor = ContactSensorCfg(
+                    name="racket_court_contact",
+                    primary=ContactMatch(mode="geom", pattern="tennis_racket_collision", entity="robot"),
+                    secondary=ContactMatch(mode="geom", pattern="tennis_court_racket_collision", entity="tennis_court"),
+                    fields=("found", "force"),
+                    reduce="maxforce",
+                    global_frame=False,
+                    num_slots=1,
+                    history_length=decimation_est,
+                    debug=False,
+                )
+                sensors.append(racket_court_sensor)
 
-        mjlab_dt = self.cfg.sim.get("mjlab_physics_dt", None)
-        if mjlab_dt is None:
-            mjlab_dt = self.cfg.sim.get("mujoco_physics_dt", None)
+        scene_cfg.sensors = tuple(sensors)
 
         self.sim_cfg = sim_cfg = SimulationCfg(
             nconmax=200,
@@ -95,6 +170,22 @@ class SimpleEnv(_Env):
         )
         if not hasattr(self.scene, "env_origins") and hasattr(self.scene, "env_offsets"):
             self.scene.env_origins = self.scene.env_offsets
+        self._align_tennis_court_to_env_origins()
+
+    def _align_tennis_court_to_env_origins(self, env_ids: torch.Tensor | None = None):
+        if "tennis_court" not in self.scene.entities:
+            return
+        court = self.scene["tennis_court"]
+        if not getattr(court, "is_mocap", False):
+            return
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        if env_ids.numel() == 0:
+            return
+        pose = torch.zeros((env_ids.numel(), 7), device=self.device, dtype=torch.float32)
+        pose[:, :3] = self.scene.env_origins[env_ids]
+        pose[:, 3] = 1.0
+        court.write_mocap_pose_to_sim(pose, env_ids=env_ids)
 
         
     def _reset_idx(self, env_ids: torch.Tensor):
@@ -104,6 +195,7 @@ class SimpleEnv(_Env):
         self.stats[env_ids] = 0.0
         if hasattr(self.scene, "reset"):
             self.scene.reset(env_ids)
+        self._align_tennis_court_to_env_origins(env_ids)
 
     def render(self, mode: str = "human"):
         return super().render(mode)

@@ -176,6 +176,8 @@ class TrainStateRecorder:
             "iter_idx": s.iter_idx[:count],
             "rollout_step": s.rollout_step[:count],
             "env_ids": s.env_ids_cpu.numpy(),
+            "env_origins": self.base_env.scene.env_origins[s.env_ids_device].detach().cpu().float().numpy(),
+            "train_num_envs": np.asarray([int(self.base_env.num_envs)], dtype=np.int32),
             "joint_names": np.asarray(self.asset.joint_names),
             "body_names": np.asarray(self.asset.body_names),
             "robot_name": np.asarray([self.base_env.cfg.robot.name]),
