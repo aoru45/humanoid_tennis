@@ -1,5 +1,6 @@
 import warnings
 import copy
+import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Union
@@ -59,6 +60,38 @@ class IdentityAction(nn.Module):
     def forward(self, x):
         return x
 
+class LatentActionBarrier(nn.Module):
+    def __init__(self, latent_scale: float = 1.0, logvar_min: float = -5.0, logvar_max: float = 2.0):
+        super().__init__()
+        self.latent_scale = float(latent_scale)
+        self.logvar_min = float(logvar_min)
+        self.logvar_max = float(logvar_max)
+
+    def forward(self, prior_mu: torch.Tensor, prior_logvar: torch.Tensor, delta_z: torch.Tensor):
+        prior_logvar = prior_logvar.clamp(self.logvar_min, self.logvar_max)
+        prior_std = torch.exp(0.5 * prior_logvar)
+        return prior_mu + self.latent_scale * prior_std * torch.tanh(delta_z)
+        # return prior_mu + torch.randn_like(prior_std) * prior_std
+
+
+class ReplaceJointAction(nn.Module):
+    def __init__(self, joint_ids: List[int], scale: float = 1.0):
+        super().__init__()
+        self.register_buffer("joint_ids", torch.tensor(joint_ids, dtype=torch.long))
+        self.scale = float(scale)
+
+    def forward(self, base_action: torch.Tensor, wrist_action: torch.Tensor):
+        if self.joint_ids.numel() == 0:
+            return base_action
+        if wrist_action.shape[-1] != self.joint_ids.numel():
+            raise ValueError(
+                f"wrist action dim mismatch: got {wrist_action.shape[-1]}, "
+                f"expected {self.joint_ids.numel()}."
+            )
+        out = base_action.clone()
+        out[..., self.joint_ids] = wrist_action * self.scale
+        return out
+
 # ------------------------------------------------------------------------------------------------ #
 # 1. Config
 # ------------------------------------------------------------------------------------------------ #
@@ -103,17 +136,27 @@ class PPOConfig:
     pulse_logvar_min: float = -5.0
     pulse_logvar_max: float = 2.0
     pulse_prior_temp: float = 1.0
-    pulse_rollout_source: str = "posterior"  # prior | posterior
     pulse_posterior_hidden_dims: List[int] = field(default_factory=lambda: [1024, 512, 512])
     pulse_prior_hidden_dims: List[int] = field(default_factory=lambda: [1024, 512, 512])
     pulse_decoder_hidden_dims: List[int] = field(default_factory=lambda: [1024, 512, 512])
+    # If not None, clamp rollout reward sum from below before GAE.
+    # Set to null for phases/tasks that require learning from negative rewards.
+    adv_reward_clamp_min: float | None = 0.0
+    highlevel_lab_lambda: float = 1.0
+    highlevel_wrist_residual_enabled: bool = True
+    highlevel_wrist_joint_patterns: List[str] = field(
+        default_factory=lambda: [
+            "right_wrist_.*_joint",
+        ]
+    )
+    highlevel_wrist_action_scale: float = 1.0
     ############################## PULSE ##########################
     # misc
     layer_norm: Union[str, None] = "before"
     value_norm: bool = False
 
     # phase switch
-    phase: str = "train"  # train | finetune | adapt | pulse
+    phase: str = "train"  # train | finetune | adapt | pulse | highlevel
     vecnorm: Union[str, None] = None
     symmetry_enabled: bool = True
 
@@ -135,6 +178,7 @@ cs.store("ppo_train", node=PPOConfig(phase="train", vecnorm="train", entropy_coe
 cs.store("ppo_adapt", node=PPOConfig(phase="adapt", vecnorm="eval", train_every=16), group="algo")
 cs.store("ppo_finetune", node=PPOConfig(phase="finetune", vecnorm="eval", lr=1e-4, entropy_coef_start=0.0025, entropy_coef_end=0.0005), group="algo")
 cs.store("ppo_pulse", node=PPOConfig(phase="pulse", vecnorm="eval", train_every=16), group="algo")
+cs.store("ppo_highlevel", node=PPOConfig(phase="highlevel", vecnorm="eval", train_every=16, lr=2e-4, entropy_coef_start=0.005, entropy_coef_end=0.001), group="algo")
 
 class PPOPolicy(TensorDictModuleBase):
     def __init__(
@@ -150,13 +194,20 @@ class PPOPolicy(TensorDictModuleBase):
         self.cfg = cfg
         self.device = device
         self.observation_spec = observation_spec
-        assert cfg.phase in {"train", "finetune", "adapt", "pulse"}
+        assert cfg.phase in {"train", "finetune", "adapt", "pulse", "highlevel"}
 
         self.entropy_coef = cfg.entropy_coef_start
         self.clip_param = cfg.clip_param
         self.action_dim = action_spec.shape[-1]
         self.action_manager = env.action_manager
         self.joint_names = env.action_manager.joint_names
+        self.highlevel_action_key = "highlevel_action"
+        (
+            self.highlevel_wrist_joint_ids,
+            self.highlevel_wrist_joint_names,
+        ) = self._resolve_highlevel_wrist_joints()
+        self.highlevel_wrist_dim = len(self.highlevel_wrist_joint_ids)
+        self.highlevel_action_dim = int(self.cfg.pulse_latent_dim) + int(self.highlevel_wrist_dim)
         init_noise_scale = self._resolve_init_noise_scale()
         self._init_noise_scale_max = torch.tensor(init_noise_scale, device=device, dtype=torch.float32)
         self.gae = GAE(0.99, 0.95)
@@ -194,21 +245,39 @@ class PPOPolicy(TensorDictModuleBase):
         actor_in_keys_train = [OBS_KEY, "priv_feature"]
         actor_in_keys_adapt = [OBS_KEY, "priv_pred"]
 
-        def build_actor(in_keys):
+        def build_actor(in_keys, *, output_dim: int | None = None, out_key: str = ACTION_KEY, init_scale=None):
+            if output_dim is None:
+                output_dim = self.action_dim
+            if init_scale is None:
+                init_scale = init_noise_scale
             return ProbabilisticActor(
                 module=Seq(
                     CatTensors(in_keys, "_actor_inp", del_keys=False, sort=False),
                     Mod(make_mlp([1024, 512, 512]), ["_actor_inp"], ["_actor_feature"]),
-                    Mod(Actor(self.action_dim, init_noise_scale=init_noise_scale, load_noise_scale=self.cfg.load_noise_scale), ["_actor_feature"], ["loc", "scale"]),
+                    Mod(
+                        Actor(
+                            output_dim,
+                            init_noise_scale=init_scale,
+                            load_noise_scale=self.cfg.load_noise_scale if out_key == ACTION_KEY else None,
+                        ),
+                        ["_actor_feature"],
+                        ["loc", "scale"],
+                    ),
                 ),
                 in_keys=["loc", "scale"],
-                out_keys=[ACTION_KEY],
+                out_keys=[out_key],
                 distribution_class=IndependentNormal,
                 return_log_prob=True,
             ).to(device)
 
         self.actor_teacher = build_actor(actor_in_keys_train)
         self.actor_student = build_actor(actor_in_keys_adapt)
+        self.actor_highlevel = build_actor(
+            [OBS_KEY],
+            output_dim=self.highlevel_action_dim,
+            out_key=self.highlevel_action_key,
+            init_scale=float(self.cfg.init_noise_scale),
+        )
 
         # --------------------------------------------------------------------- pulse modules
         self.pulse_posterior = Seq(
@@ -269,6 +338,28 @@ class PPOPolicy(TensorDictModuleBase):
             ["pulse_action"],
             [ACTION_KEY],
         ).to(device)
+        self.highlevel_action_split = Mod(
+            Split(self.cfg.pulse_latent_dim),
+            [self.highlevel_action_key],
+            ["delta_z", "wrist_action_replace"],
+        ).to(device)
+        self.highlevel_latent_barrier = Mod(
+            LatentActionBarrier(
+                latent_scale=float(getattr(self.cfg, "highlevel_lab_lambda", 1.0)),
+                logvar_min=float(getattr(self.cfg, "pulse_logvar_min", -5.0)),
+                logvar_max=float(getattr(self.cfg, "pulse_logvar_max", 2.0)),
+            ),
+            ["pulse_prior_mu", "pulse_prior_logvar", "delta_z"],
+            ["pulse_z"],
+        ).to(device)
+        self.highlevel_wrist_residual = Mod(
+            ReplaceJointAction(
+                self.highlevel_wrist_joint_ids,
+                scale=float(getattr(self.cfg, "highlevel_wrist_action_scale", 1.0)),
+            ),
+            ["pulse_action", "wrist_action_replace"],
+            ["pulse_action"],
+        ).to(device)
 
         # ---------------------------------------------------------------------------- critic (shared)
         self.critic = Seq(
@@ -288,7 +379,11 @@ class PPOPolicy(TensorDictModuleBase):
         self.pulse_prior(fake_td)
         self.pulse_prior_sampler(fake_td)
         self.pulse_post_sampler(fake_td)
+        self.actor_highlevel(fake_td)
+        self.highlevel_action_split(fake_td)
+        self.highlevel_latent_barrier(fake_td)
         self.pulse_decoder(fake_td)
+        self.highlevel_wrist_residual(fake_td)
         self.pulse_action_head(fake_td)
         self.critic(fake_td)
 
@@ -313,6 +408,10 @@ class PPOPolicy(TensorDictModuleBase):
         )
         self.opt_student = torch.optim.Adam(
             self.actor_student.parameters(),
+            lr=cfg.lr,
+        )
+        self.opt_highlevel = torch.optim.Adam(
+            self.actor_highlevel.parameters(),
             lr=cfg.lr,
         )
         self.opt_critic = torch.optim.Adam(self.critic.parameters(), lr=cfg.lr)
@@ -352,6 +451,16 @@ class PPOPolicy(TensorDictModuleBase):
             update_encoder=False,
             update_actor=False,
         )
+        self.update_highlevel = functools.partial(
+            self._update,
+            actor=self.actor_highlevel,
+            encoder=None,
+            critic=self.critic,
+            opt_actor=self.opt_highlevel,
+            opt_critic=self.opt_critic,
+            update_encoder=False,
+            update_actor=True,
+        )
         self.update2 = functools.partial(self._update2, adapt_module=self.adapt_module, opt_estimator=self.opt_estimator)
 
         self.use_symmetry_ppo = bool(getattr(self.cfg, "symmetry_enabled", True))
@@ -373,6 +482,7 @@ class PPOPolicy(TensorDictModuleBase):
 
         self.actor_teacher = DDP(self.actor_teacher, **ddp_kwargs)
         self.actor_student = DDP(self.actor_student, **ddp_kwargs)
+        self.actor_highlevel = DDP(self.actor_highlevel, **ddp_kwargs)
         self.encoder_priv  = DDP(self.encoder_priv,  **ddp_kwargs)
         self.critic        = DDP(self.critic,        **ddp_kwargs)
         self.adapt_module  = DDP(self.adapt_module,  **ddp_kwargs)
@@ -405,6 +515,34 @@ class PPOPolicy(TensorDictModuleBase):
             scales[idx] = float(scale)
         return scales
 
+    def _resolve_highlevel_wrist_joints(self):
+        if not bool(getattr(self.cfg, "highlevel_wrist_residual_enabled", False)):
+            return [], []
+        patterns = list(getattr(self.cfg, "highlevel_wrist_joint_patterns", []) or [])
+        if len(patterns) == 0:
+            warnings.warn(
+                "highlevel_wrist_residual_enabled=True but highlevel_wrist_joint_patterns is empty. "
+                "Disable wrist replace branch."
+            )
+            return [], []
+        ids = []
+        names = []
+        for i, name in enumerate(self.joint_names):
+            if any(re.match(pattern, name) for pattern in patterns):
+                ids.append(i)
+                names.append(name)
+        if len(ids) == 0:
+            warnings.warn(
+                f"No joints matched highlevel_wrist_joint_patterns={patterns}. "
+                "Disable wrist replace branch."
+            )
+            return [], []
+        aa.print(
+            "highlevel wrist replace joints: "
+            + ", ".join(f"{i}:{n}" for i, n in zip(ids, names))
+        )
+        return ids, names
+
     def do_lr_schedule(self, kl):
         if not hasattr(self, "current_lr"):
             self.current_lr = self.cfg.lr
@@ -425,7 +563,7 @@ class PPOPolicy(TensorDictModuleBase):
 
         self.current_lr = new_lr
 
-        for opt in (self.opt_teacher, self.opt_student):
+        for opt in (self.opt_teacher, self.opt_student, self.opt_highlevel):
             for param_group in opt.param_groups:
                 param_group["lr"] = self.current_lr
 
@@ -445,15 +583,16 @@ class PPOPolicy(TensorDictModuleBase):
         elif self.cfg.phase == "adapt":
             modules += [self.adapt_module]
             modules += [self.actor_student]
+        elif self.cfg.phase == "highlevel":
+            modules += [self.actor_highlevel, self.highlevel_action_split, self.pulse_prior]
+            modules += [
+                self.highlevel_latent_barrier,
+                self.pulse_decoder,
+                self.highlevel_wrist_residual,
+                self.pulse_action_head,
+            ]
         elif self.cfg.phase == "pulse":
-            source = str(getattr(self.cfg, "pulse_rollout_source", "posterior")).lower()
-            if source == "prior":
-                modules += [self.pulse_prior, self.pulse_prior_sampler, self.pulse_decoder, self.pulse_action_head]
-            elif source == "posterior":
-                modules += [self.encoder_priv, self.pulse_posterior, self.pulse_post_sampler, self.pulse_decoder, self.pulse_action_head]
-            else:
-                raise ValueError(f"Invalid pulse_rollout_source='{source}', expected 'prior' or 'posterior'.")
-
+            modules += [self.encoder_priv, self.pulse_posterior, self.pulse_post_sampler, self.pulse_decoder, self.pulse_action_head]
         policy = Seq(*modules)
         return policy
 
@@ -501,6 +640,9 @@ class PPOPolicy(TensorDictModuleBase):
                 info.update(self._ppo_update(td, self.update_student_critic))
         elif self.cfg.phase == "pulse":
             info = self.train_pulse(td)
+        elif self.cfg.phase == "highlevel":
+            info = {}
+            info.update(self._ppo_update(td, self.update_highlevel))
         else:  # adapt
             info = self.train_estimator(td)
         self.num_updates += 1
@@ -509,8 +651,10 @@ class PPOPolicy(TensorDictModuleBase):
 
     def _ppo_update(self, td, update_func: callable = None):
         infos = []
+        reward_clamp_min = getattr(self.cfg, "adv_reward_clamp_min", 0.0)
         self._compute_advantage(td, self.critic, self.gae, self.value_norm, 
-                               REWARD_KEY=REWARD_KEY, TERM_KEY=TERM_KEY, DONE_KEY=DONE_KEY)
+                               REWARD_KEY=REWARD_KEY, TERM_KEY=TERM_KEY, DONE_KEY=DONE_KEY,
+                               reward_clamp_min=reward_clamp_min)
         self._modewise_adv_norm(td)
 
         for _ in range(self.cfg.ppo_epochs):
@@ -519,11 +663,30 @@ class PPOPolicy(TensorDictModuleBase):
         info = {k: v.mean().item() for k, v in torch.stack(infos).items()}
 
         with torch.no_grad():
-            actor = self.actor_teacher if self.cfg.phase == "train" else self.actor_student
+            if self.cfg.phase == "train":
+                actor = self.actor_teacher
+            elif self.cfg.phase == "highlevel":
+                actor = self.actor_highlevel
+            else:
+                actor = self.actor_student
             base = actor.module if isinstance(actor, DDP) else actor
             action_std = base.module[0][2].module.actor_std.detach()
-            for joint_name, std in zip(self.joint_names, action_std):
-                info[f"actor_std/{joint_name}"] = std
+            if self.cfg.phase != "highlevel":
+                for joint_name, std in zip(self.joint_names, action_std):
+                    info[f"actor_std/{joint_name}"] = std
+            else:
+                latent_dim = int(self.cfg.pulse_latent_dim)
+                latent_std = action_std[:latent_dim]
+                info["actor_std/latent_min"] = latent_std.min()
+                info["actor_std/latent_max"] = latent_std.max()
+                info["actor_std/latent_mean"] = latent_std.mean()
+                if self.highlevel_wrist_dim > 0:
+                    wrist_std = action_std[latent_dim: latent_dim + self.highlevel_wrist_dim]
+                    info["actor_std/wrist_min"] = wrist_std.min()
+                    info["actor_std/wrist_max"] = wrist_std.max()
+                    info["actor_std/wrist_mean"] = wrist_std.mean()
+                    for name, std in zip(self.highlevel_wrist_joint_names, wrist_std):
+                        info[f"actor_std/wrist/{name}"] = std
             info["actor_std/mean"] = action_std.mean()
 
         kl = info["actor/kl"]
@@ -546,10 +709,60 @@ class PPOPolicy(TensorDictModuleBase):
         update_actor: bool = True,
         update_encoder: bool = True,
     ):
+        def _module_grads_finite(module: nn.Module | DDP | None) -> bool:
+            if module is None:
+                return True
+            base = module.module if isinstance(module, DDP) else module
+            for p in base.parameters():
+                if p.grad is not None and not torch.isfinite(p.grad).all():
+                    return False
+            return True
+
+        def _all_finite(*tensors: torch.Tensor) -> bool:
+            for t in tensors:
+                if t is None:
+                    continue
+                if isinstance(t, torch.Tensor) and not torch.isfinite(t).all():
+                    return False
+            return True
+
+        def _skip_update_info() -> dict[str, torch.Tensor]:
+            z = torch.tensor(0.0, device=self.device)
+            return {
+                "actor/policy_loss": z,
+                "actor/entropy": z,
+                "adapt/reg_loss": z,
+                "actor/actor_grad_norm": z,
+                "action/encoder_grad_norm": z,
+                "actor/clamp_ratio": z,
+                "critic/critic_grad_norm": z,
+                "actor/kl": z,
+                "actor/symmetry_loss_loc": z,
+                "actor/symmetry_loss_std": z,
+                "critic/explained_var": z,
+                "critic/value_loss": z,
+                "train/nonfinite_skip": torch.tensor(1.0, device=self.device),
+            }
+
         bsize = mb.shape[0]
         loc_old, scale_old = mb["loc"].clone(), mb["scale"].clone()
-        action_old = mb["action"].clone()
-        logp_old = mb["action_log_prob"].clone()
+        if self.cfg.phase == "highlevel":
+            action_key = self.highlevel_action_key
+            logp_key = f"{action_key}_log_prob"
+            action_old = mb[action_key].clone()
+            logp_old = mb[logp_key].clone()
+            exclude_keys = [
+                logp_key,
+                action_key,
+                "delta_z",
+                "wrist_action_replace",
+                "action_log_prob",
+                "action",
+            ]
+        else:
+            action_old = mb["action"].clone()
+            logp_old = mb["action_log_prob"].clone()
+            exclude_keys = ["action_log_prob", "action"]
 
         if self.use_symmetry_ppo:
             mb_sym = mb.clone()
@@ -566,7 +779,19 @@ class PPOPolicy(TensorDictModuleBase):
         else:
             mb = mb.exclude("next")
         valid = ~mb["is_init"]
-        mb = mb.exclude("action_log_prob", "action")
+        keys_all = mb.keys(True, True)
+        exclude_keys = [k for k in exclude_keys if k in keys_all]
+        mb = mb.exclude(*exclude_keys)
+
+        if not _all_finite(
+            loc_old,
+            scale_old,
+            action_old,
+            logp_old,
+            mb.get("adv", None),
+            mb.get("ret", None),
+        ):
+            return _skip_update_info()
 
         if encoder is not None:
             if update_encoder:
@@ -581,11 +806,20 @@ class PPOPolicy(TensorDictModuleBase):
             with torch.no_grad():
                 actor(mb)
 
-        dist = IndependentNormal(mb["loc"][:bsize], mb["scale"][:bsize])
+        loc = mb["loc"][:bsize]
+        scale = mb["scale"][:bsize]
+        if not _all_finite(loc, scale):
+            return _skip_update_info()
+
+        dist = IndependentNormal(loc, scale)
         logp = dist.log_prob(action_old)
         entropy = dist.entropy().mean()
+        if not _all_finite(logp, entropy):
+            return _skip_update_info()
 
         ratio = torch.exp(logp - logp_old).unsqueeze(-1)
+        if not _all_finite(ratio):
+            return _skip_update_info()
         surr1 = mb["adv"][:bsize] * ratio
         surr2 = mb["adv"][:bsize] * ratio.clamp(1 - self.clip_param, 1 + self.clip_param)
         policy_loss = - torch.mean(torch.min(surr1, surr2) * valid[:bsize])
@@ -594,6 +828,8 @@ class PPOPolicy(TensorDictModuleBase):
         values = critic(mb)["state_value"]
         value_loss = F.mse_loss(mb["ret"], values, reduction="none")
         value_loss = (value_loss * valid).mean(dim=0)
+        if not _all_finite(policy_loss, entropy_loss, value_loss):
+            return _skip_update_info()
 
         if self.cfg.phase == "train":
             if "priv_pred" not in mb.keys():
@@ -614,7 +850,16 @@ class PPOPolicy(TensorDictModuleBase):
             symmetry_loss_loc = torch.zeros((), device=self.device)
             symmetry_loss_std = torch.zeros((), device=self.device)
 
-        loss = policy_loss + entropy_loss + value_loss.mean() + reg_loss + symmetry_loss_loc + symmetry_loss_std
+        loss = (
+            policy_loss
+            + entropy_loss
+            + value_loss.mean()
+            + reg_loss
+            + symmetry_loss_loc
+            + symmetry_loss_std
+        )
+        if not _all_finite(loss):
+            return _skip_update_info()
 
         # do optimisation step
         opt_actor.zero_grad()
@@ -627,24 +872,36 @@ class PPOPolicy(TensorDictModuleBase):
         else:
             encoder_grad_norm = torch.tensor(0.0, device=self.device)
 
+        actor_step_ok = True
         if update_actor:
             actor_grad_norm = nn.utils.clip_grad_norm_(actor.parameters(), 1.0)
-            opt_actor.step()
-            self._clamp_actor_std(actor)
+            actor_step_ok = _all_finite(actor_grad_norm) and _module_grads_finite(actor)
         else:
             actor_grad_norm = torch.tensor(0.0, device=self.device)
 
         critic_grad_norm = nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
+        critic_step_ok = _all_finite(critic_grad_norm) and _module_grads_finite(critic)
 
+        if not (actor_step_ok and critic_step_ok):
+            opt_actor.zero_grad(set_to_none=True)
+            opt_critic.zero_grad(set_to_none=True)
+            return _skip_update_info()
+
+        if update_actor:
+            opt_actor.step()
+            self._clamp_actor_std(actor)
         opt_critic.step()
 
         with torch.no_grad():
-            explained_var = 1 - value_loss / (mb["ret"] * valid).var(dim=0)
+            explained_var = 1 - value_loss / (mb["ret"] * valid).var(dim=0).clamp_min(1.0e-6)
             clipfrac = ((ratio - 1.0).abs() > self.clip_param).float().mean()
             loc, scale = mb["loc"][:bsize], mb["scale"][:bsize]
+            scale_safe = scale.clamp_min(1.0e-6)
+            scale_old_safe = scale_old.clamp_min(1.0e-6)
             kl = torch.sum(
-                torch.log(scale) - torch.log(scale_old)
-                + (torch.square(scale_old) + torch.square(loc_old - loc)) / (2.0 * torch.square(scale))
+                torch.log(scale_safe) - torch.log(scale_old_safe)
+                + (torch.square(scale_old_safe) + torch.square(loc_old - loc))
+                / (2.0 * torch.square(scale_safe))
                 - 0.5,
                 axis=-1,
             ).mean()
@@ -660,6 +917,7 @@ class PPOPolicy(TensorDictModuleBase):
             "actor/kl": kl.detach(),
             "actor/symmetry_loss_loc": symmetry_loss_loc.detach(),
             "actor/symmetry_loss_std": symmetry_loss_std.detach(),
+            "train/nonfinite_skip": torch.tensor(0.0, device=self.device),
         }
 
         info["critic/explained_var"] = explained_var.mean().detach()
@@ -676,7 +934,19 @@ class PPOPolicy(TensorDictModuleBase):
                 break
         if actor_std is None:
             return
-        actor_std.data = torch.minimum(actor_std.data, self._init_noise_scale_max)
+        max_scale = self._init_noise_scale_max
+        if isinstance(max_scale, torch.Tensor):
+            if max_scale.numel() > 1 and max_scale.numel() != actor_std.numel():
+                max_scale = torch.full_like(actor_std.data, float(max_scale.mean().item()))
+        reset_scale = float(max_scale.mean().item()) if isinstance(max_scale, torch.Tensor) else float(max_scale)
+        actor_std.data = torch.nan_to_num(
+            actor_std.data,
+            nan=reset_scale,
+            posinf=reset_scale,
+            neginf=1.0e-4,
+        )
+        actor_std.data.clamp_(min=1.0e-4)
+        actor_std.data = torch.minimum(actor_std.data, max_scale)
 
     def train_estimator(self, td):
         infos = []
@@ -800,7 +1070,16 @@ class PPOPolicy(TensorDictModuleBase):
     @staticmethod
     @torch.compile
     @torch.no_grad()
-    def _compute_advantage(td, critic, gae, value_norm, REWARD_KEY="reward", TERM_KEY="term", DONE_KEY="done"):
+    def _compute_advantage(
+        td,
+        critic,
+        gae,
+        value_norm,
+        REWARD_KEY="reward",
+        TERM_KEY="term",
+        DONE_KEY="done",
+        reward_clamp_min: float | None = 0.0,
+    ):
         keys = td.keys(True, True)
         if not ("state_value" in keys and ("next", "state_value") in keys):
             with td.view(-1) as flat:
@@ -810,7 +1089,9 @@ class PPOPolicy(TensorDictModuleBase):
         v = td["state_value"]
         v_next = td["next", "state_value"]
 
-        rewards = td[REWARD_KEY].sum(dim=-1, keepdim=True).clamp_min(0.)
+        rewards = td[REWARD_KEY].sum(dim=-1, keepdim=True)
+        if reward_clamp_min is not None:
+            rewards = rewards.clamp_min(float(reward_clamp_min))
 
         adv, ret = gae(
             rewards,
@@ -924,12 +1205,42 @@ class PPOPolicy(TensorDictModuleBase):
             except Exception as exc:
                 warnings.warn(f"Failed to load teacher module {name}: {exc}")
 
+    def load_pulse_modules_state_dict(self, state_dict, strict=True):
+        pulse_modules = ("pulse_prior", "pulse_decoder")
+        for name in pulse_modules:
+            if name not in state_dict:
+                warnings.warn(f"Pulse checkpoint missing required module '{name}'.")
+                continue
+            module = getattr(self, name, None)
+            if module is None:
+                warnings.warn(f"Current policy has no module '{name}' to load.")
+                continue
+            try:
+                if isinstance(module, DDP):
+                    module.module.load_state_dict(state_dict[name], strict=strict)
+                else:
+                    module.load_state_dict(state_dict[name], strict=strict)
+            except Exception as exc:
+                warnings.warn(f"Failed to load pulse module {name}: {exc}")
+
+    # Backward compatibility: keep old API name used by existing callers.
+    def load_highlevel_from_pulse_state_dict(self, state_dict, strict=True):
+        self.load_pulse_modules_state_dict(state_dict, strict=strict)
+
     def prepare_for_phase(self):
-        if self.cfg.phase != "pulse":
+        if self.cfg.phase == "pulse":
+            self._freeze_module(self.encoder_priv)
+            self._freeze_module(self.actor_teacher)
+            self._freeze_module(self.adapt_module)
             return
-        self._freeze_module(self.encoder_priv)
-        self._freeze_module(self.actor_teacher)
-        self._freeze_module(self.adapt_module)
+        if self.cfg.phase == "highlevel":
+            self._freeze_module(self.encoder_priv)
+            self._freeze_module(self.actor_teacher)
+            self._freeze_module(self.adapt_module)
+            self._freeze_module(self.pulse_posterior)
+            self._freeze_module(self.pulse_prior)
+            self._freeze_module(self.pulse_decoder)
+            return
 
     @staticmethod
     def _freeze_module(module):

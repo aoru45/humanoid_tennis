@@ -8,36 +8,10 @@ NUM_ENVS="${NUM_ENVS:-8}"
 PULSE_TEMP="${PULSE_TEMP:-1.0}"
 CFG_PATH="${CFG_PATH:-cfg/train.yaml}"
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-18/01-01-39-tracking-pulse-tennis-0418-0101/wandb/run-20260418_010213-fy4oipc6/files/checkpoint_final.pt}"
+# CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-17/23-05-53-tracking-pulse-only-tennis-0417-2305/wandb/run-20260417_230629-nxafmogr/files/checkpoint_final.pt}"
 
-#CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-17/23-05-53-tracking-pulse-only-tennis-0417-2305/wandb/run-20260417_230629-nxafmogr/files/checkpoint_final.pt}"
 USE_RACKET="${USE_RACKET:-1}"
-ROBOT_NAME="${ROBOT_NAME:-}"
-
-USE_RACKET_NORM="$(printf '%s' "${USE_RACKET}" | tr '[:upper:]' '[:lower:]')"
-if [[ -z "${ROBOT_NAME}" ]]; then
-  case "${USE_RACKET_NORM}" in
-    1|true|yes|y|on)
-      ROBOT_NAME="g1_col_full_self_racket"
-      ;;
-    0|false|no|n|off|"")
-      ROBOT_NAME="g1_col_full_self"
-      ;;
-    *)
-      echo "[ERROR] Invalid USE_RACKET='${USE_RACKET}', expected 0/1 or true/false."
-      exit 1
-      ;;
-  esac
-fi
-
-if [[ ! -f "${CHECKPOINT_PATH}" ]]; then
-  echo "[ERROR] Checkpoint not found: ${CHECKPOINT_PATH}"
-  exit 1
-fi
-
-if [[ ! -f "${CFG_PATH}" ]]; then
-  echo "[ERROR] Config file not found: ${CFG_PATH}"
-  exit 1
-fi
+ROBOT_NAME="${ROBOT_NAME:-g1_col_full_self_racket}"
 
 echo "[INFO] Launch pulse random inference"
 echo "[INFO] checkpoint=${CHECKPOINT_PATH}"

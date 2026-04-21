@@ -15,11 +15,9 @@ ASSET_PATH = os.path.dirname(__file__)
 G1_XML = Path(ASSET_PATH) / "G1" / "g1.xml"
 G1_RACKET_XML = Path(ASSET_PATH) / "G1" / "g1_racket.xml"
 G1_RACKET_MESH = Path(ASSET_PATH) / "G1_racket" / "unitree_g1" / "assets" / "tennis" / "entire_visual.STL"
-# Keep racket mass-neutral for controlled comparisons.
 RACKET_MASS = 0.345643
-# RACKET_MASS = 0.0  # kg
 RACKET_COLLISION_CONTYPE = 2
-RACKET_COLLISION_CONAFFINITY = 1  # only collide with ball (contype=1)
+RACKET_COLLISION_CONAFFINITY = 1 
 
 
 def _get_assets(meshdir: str) -> dict[str, bytes]:

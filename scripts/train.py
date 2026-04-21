@@ -39,6 +39,29 @@ import os
 FILE_PATH = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(FILE_PATH, "..", "cfg")
 
+
+_ACTOR_STD_KEEP_KEYS = {
+    "actor_std/mean",
+    "actor_std/latent_min",
+    "actor_std/latent_max",
+    "actor_std/latent_mean",
+    "actor_std/wrist_min",
+    "actor_std/wrist_max",
+    "actor_std/wrist_mean",
+}
+
+
+def _compact_wandb_metrics(info: dict) -> dict:
+    compact = {}
+    for key, value in info.items():
+        if key.startswith("highlevel/live_manual_"):
+            continue
+        if key.startswith("actor_std/") and key not in _ACTOR_STD_KEEP_KEYS:
+            continue
+        compact[key] = value
+    return compact
+
+
 @hydra.main(config_path=CONFIG_PATH, config_name="train", version_base=None)
 def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
@@ -65,6 +88,10 @@ def main(cfg: DictConfig):
 
     need_logging = aa.is_main_process() and cfg.wandb.get("mode", "disabled") != "disabled"
     if need_logging:
+        compact_metrics = bool(cfg.wandb.get("compact_metrics", True))
+        include_env_extra = bool(cfg.wandb.get("include_env_extra", True))
+        include_stats_ema = bool(cfg.wandb.get("include_stats_ema", False))
+
         default_run_name = f"{cfg.exp_name}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')}"
         run = init_wandb_run(cfg.wandb, config=cfg, name=default_run_name)
         if run.id:
@@ -195,14 +222,19 @@ def main(cfg: DictConfig):
                 for k, v in sorted(episode_stats.pop().items(True, True)):
                     key = "train/" + ("/".join(k) if isinstance(k, tuple) else k)
                     info[key] = torch.mean(v.float()).item()
-            
+
             info.update(train_carry)
-            info.update(env.extra)
-            info.update(env.stats_ema)
+            if include_env_extra:
+                info.update(env.extra)
+            if include_stats_ema:
+                info.update(env.stats_ema)
 
             info["env_frames"] = env_frames * aa.get_world_size()
             info["rollout_fps"] = data.numel() / rollout_time * aa.get_world_size()
             info["training_time"] = time.perf_counter() - training_start
+
+            if compact_metrics:
+                info = _compact_wandb_metrics(info)
         
             if save_interval and save_interval > 0 and should_save(i):
                 save(policy, f"checkpoint_{i}")

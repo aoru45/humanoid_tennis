@@ -13,7 +13,6 @@ algo:
   pulse_latent_dim: 32
   pulse_kl_coef_start: 5.0e-3
   pulse_kl_coef_end: 1.0e-3
-  pulse_rollout_source: posterior
   pulse_regu_coef: 0.05
   pulse_kl_anneal_start: 0.3
   pulse_kl_anneal_end: 1.0

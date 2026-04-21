@@ -9,23 +9,7 @@ WANDB_ENTITY="${WANDB_ENTITY:-aoru45}"
 WANDB_PROJECT="${WANDB_PROJECT:-gentle_humanoid}"
 RUN_NAME="${RUN_NAME:-tracking-stage1-tennis-$(date +%m%d-%H%M)}"
 USE_RACKET="${USE_RACKET:-1}"
-ROBOT_NAME="${ROBOT_NAME:-}"
-
-USE_RACKET_NORM="$(printf '%s' "${USE_RACKET}" | tr '[:upper:]' '[:lower:]')"
-if [[ -z "${ROBOT_NAME}" ]]; then
-  case "${USE_RACKET_NORM}" in
-    1|true|yes|y|on)
-      ROBOT_NAME="g1_col_full_self_racket"
-      ;;
-    0|false|no|n|off|"")
-      ROBOT_NAME="g1_col_full_self"
-      ;;
-    *)
-      echo "[ERROR] Invalid USE_RACKET='${USE_RACKET}', expected 0/1 or true/false."
-      exit 1
-      ;;
-  esac
-fi
+ROBOT_NAME="${ROBOT_NAME:-g1_col_full_self_racket}"
 
 RUN_NAME_SLUG="$(printf '%s' "${RUN_NAME}" | tr '[:space:]/' '__' | tr -cd '[:alnum:]_.-')"
 if [[ -z "${RUN_NAME_SLUG}" ]]; then

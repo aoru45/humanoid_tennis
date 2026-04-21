@@ -1,0 +1,187 @@
+name: G1TENNISHIGHLEVEL
+
+defaults:
+  - /task/G1/G1
+  - _self_
+
+robot:
+  name: g1_col_full_self_racket
+
+max_episode_length: 1000
+rand_init_episode_length: false
+
+tennis:
+  add_court: true
+  add_ball: true
+  court_texture: green
+  net_height: 0.914
+  net_collision_half_thickness: 0.06
+  racket_court_collision: false
+  enable_contact_sensors: true
+
+action:
+  _target_: active_adaptation.envs.mdp.action.JointPosition
+  action_scaling:
+    .*elbow_joint: 1.0
+    .*shoulder.*: 1.0
+    .*wrist.*: 1.0
+    .*hip_roll.*: 0.5
+    .*hip_yaw.*: 0.5
+    .*hip_pitch.*: 0.5
+    .*knee.*: 0.5
+    .*waist.*: 0.5
+    .*ankle.*: 0.5
+  alpha: [0.85, 1.0]
+  max_delay: 0
+  delay_full_progress: 0.5
+  boot_protect: false
+  boot_delay_steps: 0
+
+command:
+  _target_: active_adaptation.envs.mdp.commands.highlevel_tennis.HighLevelTennisCommand
+  max_task_steps: 1000
+  debug_draw: false
+  # Raised to avoid reset-time penetration with court ground colliders.
+  robot_spawn_pos: [0.0, -8, 0.81]
+  robot_spawn_yaw: 1.5707963267948966
+  robot_spawn_xy_noise: [0.8, 1.0]
+  robot_spawn_yaw_noise_deg: 10.0
+  max_consecutive_returns_before_finish: 8
+  relaunch_on_success: true
+  launch_interval_s: 2.0
+  highlevel_latent_dim: 32
+  ball_obs_history_steps: [0, 1, 2, 3, 4]
+  approach_oracle_mix_start: 1.0
+  approach_oracle_mix_end: 0.0
+  approach_oracle_mix_full_progress: 1.0
+  approach_contact_lead_time: 0.16
+  approach_contact_min_t: 0.06
+  approach_contact_max_t: 1.20
+  hitting_zone_xy_radius: 0.40
+  hitting_zone_z_tol: 0.26
+  hitting_zone_time_min: 0.05
+  hitting_zone_time_max: 0.65
+  wrist_joint_patterns: [right_wrist_.*_joint]
+  launcher_z_range: [2, 2.5]
+  strike_z_range: [1.15, 1.65]
+  flight_t_range: [0.5, 0.8]
+  launch_speed_range: [14.0, 22.0]
+  launch_spin_rps_range: [-9.0, 9.0]
+  launch_solver_iters: 4
+  launch_resample_attempts: 20
+  launch_strike_tolerance: 0.22
+  launch_prediction_substeps: 4
+  launch_predict_dt: 0.005
+  enforce_launch_net_clearance: true
+  launch_net_clearance_margin: 0.12
+  launch_angle_deg_range: [12.0, 28.0]
+  launch_min_vz: 4.2
+  launch_min_forward_speed: 14.0
+  launch_clearance_correction_iters: 8
+  enforce_launch_incoming_bounce_in: true
+  incoming_bounce_x_range: [-3.8, 3.8]
+  incoming_bounce_y_range: [-10.8, -0.4]
+  launch_bank_file: null
+  require_launch_bank: true
+  launch_bank_shuffle: true
+  pre_hit_dead_ball_speed_thres: 1.0
+  pre_hit_dead_ball_height_margin: 0.05
+  pre_hit_dead_ball_patience_steps: 20
+  pre_hit_dead_ball_min_steps: 24
+  post_hit_dead_ball_speed_thres: 1.0
+  post_hit_dead_ball_height_margin: 0.05
+  post_hit_dead_ball_patience_steps: 30
+  post_hit_dead_ball_min_steps: 24
+  ground_recover_enable: true
+  ground_recover_trigger_z: 0.0
+  ground_recover_surface_z: 0.016
+  ground_recover_speed_thres: 1.0
+  ground_recover_bounce_restitution: 0.7
+  ground_recover_min_upward_speed: 1.2
+  ground_recover_horizontal_damping: 0.9
+  ground_recover_spin_damping: 0.85
+  ground_recover_max_speed: 5.0
+
+observation:
+  policy:
+    ball_task_obs: {}
+    root_angvel_b_history: {history_steps: [0, 1, 2, 3, 4], noise_std: 0.15}
+    projected_gravity_history: {history_steps: [0, 1, 2, 3, 4], noise_std: 0.015, bias_noise_std: 0.02}
+    joint_pos_history: {history_steps: [0, 1, 2, 3, 4], noise_std: 0.01}
+    joint_vel_history: {history_steps: [0, 1, 2, 3, 4], noise_std: 0.4}
+    prev_actions: {steps: 4}
+  pulse_policy:
+    root_linvel_b_history: {history_steps: [0, 1, 2, 3, 4, 8, 12, 16, 20], noise_std: 0.0}
+    root_angvel_b_history: {history_steps: [0, 1, 2, 3, 4, 8, 12, 16, 20], noise_std: 0.0}
+    projected_gravity_history: {history_steps: [0, 1, 2, 3, 4, 8, 12, 16, 20], noise_std: 0.0, bias_noise_std: 0.0}
+    joint_pos_history: {history_steps: [0, 1, 2, 3, 4, 8, 12, 16, 20], noise_std: 0.0}
+    joint_vel_history: {history_steps: [0, 1, 2, 3, 4, 8, 12, 16, 20], noise_std: 0.0}
+  priv:
+    ball_priv_obs: {}
+    root_linvel_b_history: {history_steps: [0, 1, 2, 3, 4], noise_std: 0.0}
+    root_angvel_b_history: {history_steps: [0, 1, 2, 3, 4], noise_std: 0.0}
+    projected_gravity_history: {history_steps: [0, 1, 2, 3, 4], noise_std: 0.0, bias_noise_std: 0.0}
+    joint_pos_history: {history_steps: [0, 1, 2, 3, 4], noise_std: 0.0}
+    joint_vel_history: {history_steps: [0, 1, 2, 3, 4], noise_std: 0.0}
+    applied_action: {}
+    applied_torque: {}
+  priv_critic:
+    ball_priv_obs: {}
+    body_height: {body_names: ["pelvis", "torso_link", ".*ankle_roll_link"]}
+
+reward:
+  _mult_dt_: false
+  task:
+    approach_ball: {weight: 10.0, sigma: [0.25, 0.55], root_sigma: [0.45, 0.95], min_bounce_t: 0.03, max_bounce_t: 1.8, rear_margin_y: 0.8, early_preposition_weight: 0.45, root_preposition_blend: 0.85, lateral_stance_offset: 0.30, z_weight: 0.25, z_sigma: [0.08, 0.18], z_activate_net_y: -0.50, z_activate_xy_dist: 0.30}
+    root_towards_ball_speed: {weight: 1.5, target_speed: 1.0, distance_norm: 1.8, min_bounce_t: 0.03, max_bounce_t: 1.8, rear_margin_y: 0.8, lateral_stance_offset: 0.30}
+    bounce_target: {weight: 30.0, sigma: [0.5, 1.0]}
+    ball_target_progress: {weight: 12.0}
+    net_progress: {weight: 10.0}
+    net_height_margin_dense: {weight: 8.0, net_window: 0.8, height_scale: 0.14, target_clearance_over_net: 0.20}
+    forward_velocity_soft: {weight: 5.5, vy_center: 1.0, vy_scale: 2.0, vz_center: 0.3, vz_scale: 1.2}
+    outgoing_angle_band: {weight: 7.0, target_angle_deg: 12.0, angle_sigma_deg: 6.0, min_forward_speed: 2.0}
+    predicted_bounce_target: {weight: 28.0, bounce_pos_scale: 0.2, bounce_time_scale: 0.35, max_bounce_time: 1.5, require_predicted_in: false}
+    racket_face_vertical_on_hit: {weight: 18.0, normal_z_sigma: 0.22}
+    racket_horizontal_swing_on_hit: {weight: 22.0, min_horizontal_speed: 2.8, horizontal_speed_scale: 1.0, vz_sigma: 1.1}
+    hit_success: {weight: 260.0}
+    hit_contact_height: {weight: 24.0, target_height: 1.22, sigma: 0.12, min_height: 1.00}
+    enter_hitting_zone: {weight: 18.0}
+    pass_net: {weight: 120.0}
+    bounce_in_event: {weight: 80.0}
+    bounce_wrong_side_penalty: {weight: -35.0}
+    racket_speed_on_hit: {weight: 12.0}
+    net_clearance: {weight: 100.0}
+    ball_velocity_constraint: {weight: 65.0}
+    racket_velocity_constraint: {weight: 60.0, min_racket_speed: 3.5}
+    pelvis_facing_forward: {weight: 0.3}
+  reg:
+    highlevel_action_l2: {weight: -1.0e-4}
+    joint_torques_l2: {weight: 1.0e-6, enabled: true, joint_names: .*}
+    lower_body_action_rate_l2: {weight: -0.0012}
+    whole_body_action_rate_l2: {weight: -0.0030}
+    racket_acc_l2: {weight: -3.0e-6}
+    joint_acc_l2: {weight: 6.0e-8, enabled: true, joint_names: .*}
+    correction_action_l2: {weight: -0.0035}
+    correction_action_rate_l2: {weight: -0.0008}
+    wrist_torque_l2: {weight: -8.0e-5}
+    wrist_joint_smoothness_l2: {weight: -4.0e-7}
+    joint_pos_limits_l1_mean: {weight: -10.0, soft_factor: 0.9}
+    joint_vel_l2_mean: {weight: -7.5e-5}
+  term:
+    episode_fall: {weight: -450.0}
+    episode_fail_miss: {weight: -200.0}
+    episode_fail_net: {weight: -50.0}
+    episode_fail_out: {weight: -50.0}
+    episode_stroke_style_violation: {weight: -50.0}
+
+randomization: {}
+
+termination:
+  miss_ball_termination: {}
+  net_hit_termination: {}
+  ball_out_of_bounds_termination: {}
+  stroke_style_violation_termination: {}
+  fall_over: {xy_thres: 0.85, z_thres: 0.45}
+
+viewer:
+  env_spacing: 30.0

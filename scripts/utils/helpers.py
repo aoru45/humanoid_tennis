@@ -7,7 +7,7 @@ import logging
 import os
 import datetime
 
-from typing import Sequence
+from typing import Sequence, Dict, Any, Tuple, List
 from tensordict import TensorDictBase, TensorDict
 from tensordict.nn import TensorDictModuleBase as ModBase
 from torchrl.envs.transforms import VecNorm
@@ -66,6 +66,97 @@ class ObsNorm(ModBase):
             scales=vecnorm.scale
         )
 
+
+def _load_vecnorm_state(vecnorm: VecNorm, ckpt_state: Dict[str, Any]) -> Tuple[bool, str]:
+    # First try strict/full loading for true resume of identical observation spaces.
+    try:
+        vecnorm.load_state_dict(ckpt_state)
+        return True, "Loaded VecNorm state fully."
+    except Exception as full_exc:
+        full_err = str(full_exc)
+
+    # Fallback for cross-phase initialization: only load compatible observation-group stats.
+    current_state = vecnorm.state_dict()
+    ckpt_extra = ckpt_state.get("_extra_state", None)
+    current_extra = current_state.get("_extra_state", None)
+    if not isinstance(ckpt_extra, dict) or not isinstance(current_extra, dict):
+        return False, f"Failed full VecNorm load and no compatible _extra_state fallback. full_error={full_err}"
+
+    def _group_names(extra: Dict[str, Any]) -> List[str]:
+        names = set()
+        for key in extra.keys():
+            if isinstance(key, str) and key.endswith("_sum"):
+                names.add(key[: -len("_sum")])
+        return sorted(names)
+
+    loaded_groups: List[str] = []
+    skipped_groups: List[str] = []
+    for group in _group_names(current_extra):
+        sum_key = f"{group}_sum"
+        ssq_key = f"{group}_ssq"
+        cnt_key = f"{group}_count"
+        trio = (sum_key, ssq_key, cnt_key)
+
+        if any(k not in ckpt_extra for k in trio):
+            skipped_groups.append(f"{group}(missing)")
+            continue
+        if any(k not in current_extra for k in trio):
+            skipped_groups.append(f"{group}(missing_current)")
+            continue
+
+        ckpt_sum = ckpt_extra[sum_key]
+        ckpt_ssq = ckpt_extra[ssq_key]
+        ckpt_cnt = ckpt_extra[cnt_key]
+        cur_sum = current_extra[sum_key]
+        cur_ssq = current_extra[ssq_key]
+        cur_cnt = current_extra[cnt_key]
+
+        if not (
+            torch.is_tensor(ckpt_sum)
+            and torch.is_tensor(ckpt_ssq)
+            and torch.is_tensor(ckpt_cnt)
+            and torch.is_tensor(cur_sum)
+            and torch.is_tensor(cur_ssq)
+            and torch.is_tensor(cur_cnt)
+        ):
+            skipped_groups.append(f"{group}(non_tensor)")
+            continue
+
+        same_shape = (
+            ckpt_sum.shape == cur_sum.shape
+            and ckpt_ssq.shape == cur_ssq.shape
+            and ckpt_cnt.shape == cur_cnt.shape
+        )
+        if not same_shape:
+            skipped_groups.append(
+                f"{group}(shape_ckpt={tuple(ckpt_sum.shape)}/{tuple(ckpt_ssq.shape)}/{tuple(ckpt_cnt.shape)}"
+                f",cur={tuple(cur_sum.shape)}/{tuple(cur_ssq.shape)}/{tuple(cur_cnt.shape)})"
+            )
+            continue
+
+        current_extra[sum_key] = ckpt_sum.to(device=cur_sum.device, dtype=cur_sum.dtype)
+        current_extra[ssq_key] = ckpt_ssq.to(device=cur_ssq.device, dtype=cur_ssq.dtype)
+        current_extra[cnt_key] = ckpt_cnt.to(device=cur_cnt.device, dtype=cur_cnt.dtype)
+        loaded_groups.append(group)
+
+    if len(loaded_groups) == 0:
+        return False, f"Failed full VecNorm load; no compatible groups found. full_error={full_err}"
+
+    current_state["_extra_state"] = current_extra
+    try:
+        vecnorm.load_state_dict(current_state)
+    except Exception as partial_exc:
+        return (
+            False,
+            "Failed full VecNorm load and partial compatible-group load also failed. "
+            f"full_error={full_err}; partial_error={partial_exc}",
+        )
+
+    return (
+        True,
+        "Loaded VecNorm partially with compatible groups only. "
+        f"loaded={loaded_groups}, skipped={skipped_groups}",
+    )
 
 class EpisodeStats:
     def __init__(self, in_keys: Sequence[str], device: torch.device):
@@ -230,7 +321,11 @@ def make_env_policy(cfg: DictConfig):
 
     if "vecnorm" in state_dict.keys():
         print(colored("[Info]: Load VecNorm from checkpoint.", "green"))
-        vecnorm.load_state_dict(state_dict["vecnorm"])
+        ok, msg = _load_vecnorm_state(vecnorm, state_dict["vecnorm"])
+        if ok:
+            print(colored(f"[Info]: {msg}", "green"))
+        else:
+            print(colored(f"[Warn]: {msg}", "yellow"))
     if cfg.vecnorm == "train":
         print(colored("[Info]: Updating obervation normalizer.", "green"))
         transform.append(vecnorm)
@@ -259,8 +354,38 @@ def make_env_policy(cfg: DictConfig):
     aa.print("policy done")
     
     if "policy" in state_dict.keys():
-        print(colored("[Info]: Load policy from checkpoint.", "green"))
-        policy.load_state_dict(state_dict["policy"])
+        policy_state = state_dict["policy"]
+        ckpt_phase = policy_state.get("last_phase", None) if isinstance(policy_state, dict) else None
+        is_highlevel = str(getattr(cfg.algo, "phase", "")).lower() == "highlevel"
+        rollout_mode = str(cfg.get("rollout_mode", "")).lower()
+        if (
+            rollout_mode == "pulse_random"
+            and hasattr(policy, "load_pulse_modules_state_dict")
+        ):
+            print(
+                colored(
+                    "[Info]: pulse_random rollout detected. "
+                    "Load pulse modules only (prior/decoder).",
+                    "green",
+                )
+            )
+            policy.load_pulse_modules_state_dict(policy_state)
+        elif (
+            is_highlevel
+            and str(ckpt_phase).lower() == "pulse"
+            and hasattr(policy, "load_highlevel_from_pulse_state_dict")
+        ):
+            print(
+                colored(
+                    "[Info]: High-level phase + pulse checkpoint detected. "
+                    "Load pulse modules only (prior/decoder).",
+                    "green",
+                )
+            )
+            policy.load_highlevel_from_pulse_state_dict(policy_state)
+        else:
+            print(colored("[Info]: Load policy from checkpoint.", "green"))
+            policy.load_state_dict(policy_state)
     if "policy" in teacher_state_dict.keys():
         print(colored("[Info]: Load teacher-only modules from teacher checkpoint.", "green"))
         policy.load_teacher_state_dict(teacher_state_dict["policy"])

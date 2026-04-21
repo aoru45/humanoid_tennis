@@ -1,0 +1,24 @@
+# @package _global_
+
+defaults:
+  - override /algo: ppo_highlevel
+
+task:
+  student_train: false
+
+algo:
+  in_keys: [policy, pulse_policy, priv, priv_critic]
+  symmetry_enabled: false
+  init_noise_scale: 0.20
+  entropy_coef_start: 0.001
+  entropy_coef_end: 0.0002
+  desired_kl: 0.005
+  value_norm: true
+  adv_reward_clamp_min: null
+  highlevel_lab_lambda: 0.65
+  pulse_logvar_max: 0.5
+  highlevel_wrist_residual_enabled: true
+  highlevel_wrist_joint_patterns: [right_wrist_.*_joint]
+  highlevel_wrist_action_scale: 1.0
+
+total_frames: 6200_000_000

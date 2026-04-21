@@ -7,9 +7,11 @@
         type="sphere"
         size="0.0335"
         mass="0.057"
-        rgba="0.95 0.95 0.20 1.0"
+        rgba="1 0 0 1.0"
         condim="3"
         friction="0.70 0.05 0.01"
+        solref="0.010 0.55"
+        solimp="0.95 0.995 0.001 0.5 2"
         contype="1"
         conaffinity="14"
       />

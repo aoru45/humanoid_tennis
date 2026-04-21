@@ -422,8 +422,18 @@ class _Env(EnvBase):
         if env_ids.numel() > 0:
             # reset things in simulation
             self._reset_idx(env_ids)
-            # reset episode length buffer
-            self.episode_length_buf[env_ids] = torch.randint(0, self.max_episode_length // 10, (env_ids.numel(),), device=self.device)
+            # Optional random initialization of episode length (legacy trick used by some tasks).
+            # For tasks that require strict "from-head" rollouts, set task.rand_init_episode_length=false.
+            rand_init_episode_length = bool(self.cfg.get("rand_init_episode_length", True))
+            if rand_init_episode_length and self.max_episode_length > 10:
+                self.episode_length_buf[env_ids] = torch.randint(
+                    0,
+                    self.max_episode_length // 10,
+                    (env_ids.numel(),),
+                    device=self.device,
+                )
+            else:
+                self.episode_length_buf[env_ids] = 0
 
         # reset mdp
         for callback in self._reset_callbacks:
