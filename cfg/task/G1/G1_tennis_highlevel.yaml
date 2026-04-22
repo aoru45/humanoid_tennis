@@ -48,6 +48,7 @@ command:
   robot_spawn_yaw_noise_deg: 10.0
   max_consecutive_returns_before_finish: 8
   relaunch_on_success: true
+  success_requires_ball_exit: false
   launch_interval_s: 2.0
   highlevel_latent_dim: 32
   ball_obs_history_steps: [0, 1, 2, 3, 4]
@@ -140,14 +141,14 @@ reward:
     net_height_margin_dense: {weight: 8.0, net_window: 0.8, height_scale: 0.14, target_clearance_over_net: 0.20}
     forward_velocity_soft: {weight: 5.5, vy_center: 1.0, vy_scale: 2.0, vz_center: 0.3, vz_scale: 1.2}
     outgoing_angle_band: {weight: 7.0, target_angle_deg: 12.0, angle_sigma_deg: 6.0, min_forward_speed: 2.0}
-    predicted_bounce_target: {weight: 28.0, bounce_pos_scale: 0.2, bounce_time_scale: 0.35, max_bounce_time: 1.5, require_predicted_in: false}
+    predicted_bounce_target: {weight: 18.0, bounce_pos_scale: 0.2, bounce_time_scale: 0.35, max_bounce_time: 1.5, require_predicted_in: false}
     racket_face_vertical_on_hit: {weight: 18.0, normal_z_sigma: 0.22}
     racket_horizontal_swing_on_hit: {weight: 22.0, min_horizontal_speed: 2.8, horizontal_speed_scale: 1.0, vz_sigma: 1.1}
-    hit_success: {weight: 260.0}
+    hit_success: {weight: 220.0}
     hit_contact_height: {weight: 24.0, target_height: 1.22, sigma: 0.12, min_height: 1.00}
     enter_hitting_zone: {weight: 18.0}
-    pass_net: {weight: 120.0}
-    bounce_in_event: {weight: 80.0}
+    pass_net: {weight: 140.0}
+    bounce_in_event: {weight: 120.0}
     bounce_wrong_side_penalty: {weight: -35.0}
     racket_speed_on_hit: {weight: 12.0}
     net_clearance: {weight: 100.0}
@@ -155,21 +156,24 @@ reward:
     racket_velocity_constraint: {weight: 60.0, min_racket_speed: 3.5}
     pelvis_facing_forward: {weight: 0.001}
   reg:
-    highlevel_action_l2: {weight: -1.0e-4}
+    highlevel_action_l2: {weight: -2.0e-4}
     joint_torques_l2: {weight: 1.0e-6, enabled: true, joint_names: .*}
-    lower_body_action_rate_l2: {weight: -0.0012}
-    whole_body_action_rate_l2: {weight: -0.0030}
+    lower_body_action_rate_l2: {weight: -0.0016}
+    whole_body_action_rate_l2: {weight: -0.0045}
     racket_acc_l2: {weight: -3.0e-6}
     joint_acc_l2: {weight: 6.0e-8, enabled: true, joint_names: .*}
-    correction_action_l2: {weight: -0.0035}
-    correction_action_rate_l2: {weight: -0.0008}
-    wrist_torque_l2: {weight: -8.0e-5}
+    correction_action_l2: {weight: -0.0045}
+    correction_action_rate_l2: {weight: -0.0011}
+    wrist_torque_l2: {weight: -1.2e-4}
     wrist_joint_smoothness_l2: {weight: -4.0e-7}
-    joint_pos_limits_l1_mean: {weight: -10.0, soft_factor: 0.9}
-    joint_vel_l2_mean: {weight: -7.5e-5}
+    joint_pos_limits_l1_mean: {weight: -14.0, soft_factor: 0.9}
+    joint_vel_l2_mean: {weight: -1.0e-4}
   term:
-    episode_fall: {weight: -450.0}
-    episode_fail_miss: {weight: -200.0}
+    episode_success: {weight: 120.0}
+    episode_pass_net: {weight: 40.0}
+    episode_has_bounce: {weight: 40.0}
+    episode_fall: {weight: -700.0}
+    episode_fail_miss: {weight: -240.0}
     episode_fail_net: {weight: -50.0}
     episode_fail_out: {weight: -50.0}
     episode_stroke_style_violation: {weight: -50.0}
@@ -181,7 +185,7 @@ termination:
   net_hit_termination: {}
   ball_out_of_bounds_termination: {}
   stroke_style_violation_termination: {}
-  fall_over: {xy_thres: 0.85, z_thres: 0.45}
+  fall_over: {xy_thres: 0.90, z_thres: 0.40}
 
 viewer:
   env_spacing: 30.0

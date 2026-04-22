@@ -10,9 +10,9 @@ algo:
   in_keys: [policy, pulse_policy, priv, priv_critic]
   symmetry_enabled: false
   init_noise_scale: 0.20
-  entropy_coef_start: 0.001
-  entropy_coef_end: 0.0002
-  desired_kl: 0.005
+  entropy_coef_start: 0.005
+  entropy_coef_end: 0.0005
+  desired_kl: 0.012
   value_norm: true
   adv_reward_clamp_min: null
   highlevel_lab_lambda: 2

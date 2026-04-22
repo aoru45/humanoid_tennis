@@ -91,6 +91,9 @@ def main(cfg: DictConfig):
         compact_metrics = bool(cfg.wandb.get("compact_metrics", True))
         include_env_extra = bool(cfg.wandb.get("include_env_extra", True))
         include_stats_ema = bool(cfg.wandb.get("include_stats_ema", False))
+        upload_checkpoints = bool(cfg.wandb.get("upload_checkpoints", False))
+        checkpoint_dir = os.path.join(os.getcwd(), "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
 
         default_run_name = f"{cfg.exp_name}-{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')}"
         run = init_wandb_run(cfg.wandb, config=cfg, name=default_run_name)
@@ -122,7 +125,7 @@ def main(cfg: DictConfig):
         episode_stats = EpisodeStats(stats_keys, device=env.device)
 
         def save(policy, checkpoint_name: str):
-            ckpt_path = os.path.join(run.dir, f"{checkpoint_name}.pt")
+            ckpt_path = os.path.join(checkpoint_dir, f"{checkpoint_name}.pt")
             state_dict = OrderedDict()
             state_dict["wandb"] = {"name": run.name, "id": run.id}
             state_dict["policy"] = policy.state_dict()
@@ -131,7 +134,8 @@ def main(cfg: DictConfig):
             if "vecnorm" in locals():
                 state_dict["vecnorm"] = vecnorm.state_dict()
             torch.save(state_dict, ckpt_path)
-            run.save(ckpt_path, policy="now", base_path=run.dir)
+            if upload_checkpoints:
+                run.save(ckpt_path, policy="now", base_path=checkpoint_dir)
             logging.info(f"Saved checkpoint to {str(ckpt_path)}")
 
         def should_save(i):

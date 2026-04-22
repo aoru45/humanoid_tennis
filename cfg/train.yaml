@@ -35,6 +35,7 @@ wandb:
   compact_metrics: true
   include_env_extra: true
   include_stats_ema: false
+  upload_checkpoints: false
   tags: []
   id: null
   notes: null
