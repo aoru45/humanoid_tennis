@@ -297,12 +297,6 @@ def main():
     parser.add_argument("--start-step", type=int, default=None, help="Inclusive start frame index.")
     parser.add_argument("--end-step", type=int, default=None, help="Exclusive end frame index.")
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier.")
-    parser.add_argument(
-        "--loop",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Loop playback.",
-    )
     parser.add_argument("--env-index", type=int, default=0, help="Initial env slot index to replay.")
     parser.add_argument(
         "--from-launch",
@@ -315,6 +309,15 @@ def main():
         type=int,
         default=0,
         help="Which detected launch event to use in selected env (0-based).",
+    )
+    parser.add_argument(
+        "--cycle-launches",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "When --from-launch is enabled, automatically advance to next launch segment "
+            "after current segment ends. Always wraps to first launch after the last one."
+        ),
     )
     parser.add_argument(
         "--tail-after-launch",
@@ -379,6 +382,12 @@ def main():
 
     if args.speed <= 0:
         raise ValueError("--speed must be > 0.")
+    if args.cycle_launches and not args.from_launch:
+        print("[WARN] --cycle-launches requires --from-launch; disabling cycle mode.")
+        args.cycle_launches = False
+    if args.cycle_launches and args.tail_after_launch:
+        print("[WARN] --cycle-launches is incompatible with --tail-after-launch; forcing --tail-after-launch=False.")
+        args.tail_after_launch = False
 
     with np.load(args.record, allow_pickle=False) as npz:
         qpos = npz["qpos"]
@@ -522,7 +531,7 @@ def main():
         "end_step": 0,
     }
 
-    def _switch_slot(slot_idx: int, *, reason: str) -> None:
+    def _switch_slot(slot_idx: int, *, reason: str, launch_index_override: int | None = None) -> None:
         if slot_idx < 0 or slot_idx >= int(num_env_slots):
             print(f"[WARN] Ignore invalid slot index: {slot_idx}.")
             return
@@ -541,16 +550,19 @@ def main():
         start_step = int(base_start_step)
         end_step = int(base_end_step)
         launch_steps = launch_steps_all[slot_idx]
+        used_launch_index: int | None = None
         if args.from_launch:
             if launch_steps.size == 0:
                 print(f"[WARN] slot={slot_idx}: no launch event found, keep base frame range.")
             else:
-                if args.launch_index < 0 or args.launch_index >= int(launch_steps.size):
+                selected_launch_index = int(args.launch_index if launch_index_override is None else launch_index_override)
+                if selected_launch_index < 0 or selected_launch_index >= int(launch_steps.size):
                     raise ValueError(
                         f"--launch-index must be in [0, {int(launch_steps.size) - 1}] "
                         f"for env slot {slot_idx}."
                     )
-                launch_idx = int(args.launch_index)
+                launch_idx = int(selected_launch_index)
+                used_launch_index = launch_idx
                 launch_step = int(launch_steps[launch_idx])
                 start_step = max(start_step, launch_step)
                 if not args.tail_after_launch and launch_idx + 1 < int(launch_steps.size):
@@ -600,6 +612,9 @@ def main():
         state["start_step"] = int(start_step)
         state["end_step"] = int(end_step)
         state["segment_steps"] = int(end_step - start_step)
+        state["launch_steps"] = launch_steps
+        state["launch_count"] = int(launch_steps.size)
+        state["launch_index"] = used_launch_index
 
         print(
             "[INFO] Switched replay slot: "
@@ -683,11 +698,23 @@ def main():
 
             state["segment_idx"] = int(state["segment_idx"]) + 1
             if int(state["segment_idx"]) >= int(state["segment_steps"]):
-                if args.loop:
+                if args.cycle_launches and args.from_launch:
+                    launch_count = int(state.get("launch_count", 0) or 0)
+                    launch_index = state.get("launch_index", None)
+                    if launch_count > 0 and launch_index is not None:
+                        next_launch_index = int(launch_index) + 1
+                        if next_launch_index < launch_count:
+                            _switch_slot(int(state["slot"]), reason="cycle-next-launch", launch_index_override=next_launch_index)
+                            start_time = time.perf_counter()
+                            continue
+                        _switch_slot(int(state["slot"]), reason="cycle-wrap-launch", launch_index_override=0)
+                        start_time = time.perf_counter()
+                        continue
                     state["segment_idx"] = 0
                     start_time = time.perf_counter()
                 else:
-                    break
+                    state["segment_idx"] = 0
+                    start_time = time.perf_counter()
 
             target_time = start_time + int(state["segment_idx"]) * frame_dt
             delay = target_time - time.perf_counter()
