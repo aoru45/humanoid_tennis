@@ -476,7 +476,18 @@ class _Env(EnvBase):
         rewards = torch.cat(rewards, 1)
 
         self.stats["episode_len"][:] = self.episode_length_buf.unsqueeze(1)
-        self.stats["success"][:] = (self.episode_length_buf >= self.max_episode_length * 0.9).unsqueeze(1).float()
+        command_success = None
+        if hasattr(self.command_manager, "success_done"):
+            command_success = self.command_manager.success_done
+        elif hasattr(self.command_manager, "success"):
+            command_success = self.command_manager.success
+
+        if command_success is not None:
+            if command_success.ndim == 1:
+                command_success = command_success.unsqueeze(1)
+            self.stats["success"][:] = command_success.float()
+        else:
+            self.stats["success"][:] = (self.episode_length_buf >= self.max_episode_length * 0.9).unsqueeze(1).float()
         return {"reward": rewards}
     
     def _compute_termination(self) -> TensorDictBase:

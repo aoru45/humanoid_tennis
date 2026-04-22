@@ -1,120 +1,38 @@
-# Whole Body Motion Tracking
+# Motion Tracking & Tennis Agent
 
-This repository contains the training, evaluation, and deployment assets for a whole-body motion tracking policy built on top of the [GentleHumanoid](https://gentle-humanoid.axell.top) codebase.
-
-The main focus of this repository is:
-
-* training a **universal**, **robust**, and **highly dynamic** whole-body motion tracking policy,
-* supporting upper-body **compliance-aware** behavior for contact-rich interaction,
-* supporting robust live **VR teleoperation** through a separate teleop stack.
-
-The simulation and training backend is based on **mjlab**.
-
-A demo of the pretrained policy, showing one model generalizing across diverse and highly dynamic motions, is available [here](https://motion-tracking.axell.top).
-
-https://github.com/user-attachments/assets/263dd3cc-8d23-4d67-bd36-37fe89f525de
-
-https://github.com/user-attachments/assets/4d210dbf-8023-4270-b094-ab6a2353deda
-
-Instructions for deployment and runtime usage are available in the [`sim2real`](./sim2real) folder.
+## Introduction
+This project implements a physics-based reinforcement learning framework for a humanoid robot (Unitree G1) to learn motion tracking and complex high-level tasks, specifically playing tennis. The training pipeline uses MuJoCo as the underlying physics engine and is divided into a hierarchical curriculum:
+1. **Stage 1 (Motion Tracking)**: The robot learns to robustly track diverse reference motions.
+2. **Pulse Stage**: A distillation/compression phase where the robot's capabilities are encoded into a latent "Pulse" representation.
+3. **High-Level Task**: The robot utilizes the learned latent space to solve the dynamic task of intercepting and hitting a tennis ball over the net.
 
 ## Installation
-
-If you do not have `uv` installed, you can install it following the instructions in the [uv documentation](https://docs.astral.sh/uv/getting-started/installation/).
+This project uses `uv` for fast Python package management. To install all necessary dependencies, simply run:
 
 ```bash
-# this project uses uv for dependency and environment management
 uv sync
 ```
 
-## Motion Dataset Preparation
-
-<details>
-<summary><b>Quick Start: Download Preprocessed Dataset (Google Drive)</b></summary>
-
-Download link:
-
-- [Google Drive Dataset](https://drive.google.com/drive/folders/1-FBUxllaYwqGIUSCaWg_4inD-u5Tdvi9?usp=sharing)
-
-After downloading, extract it into the repository `dataset/` directory, and you should have the following structure:
-
-```text
-dataset/
-  amass_all/
-    meta.json
-    ...
-  lafan_all/
-    ...
-```
-
-</details>
-
-<details>
-<summary><b>Build Dataset from AMASS/LAFAN with GMR</b></summary>
-
-### Retargeting with GMR
-
-We use GMR to retarget the [AMASS](https://amass.is.tue.mpg.de/) and [LAFAN](https://github.com/ubisoft/ubisoft-laforge-animation-dataset) datasets. The output format is a dataset containing a series of npz files with the following fields:
-
-- `fps`: Frame rate
-- `root_pos`: Root position
-- `root_rot`: Root rotation in quaternion format (xyzw)
-- `dof_pos`: Degrees of freedom positions
-- `local_body_pos`: Local body positions
-- `local_body_rot`: Local body rotations
-- `body_names`: List of body names
-- `joint_names`: List of joint names
-
-You can use the [modified version of GMR](https://github.com/Axellwppr/GMR) to directly export npz files that meet the requirements.
-
-You should organize the processed datasets in the following structure:
-```
-<dataset_root>/
-    AMASS/ACCAD/Female1General_c3d/A1_-_Stand_stageii.npz
-    ...
-    LAFAN/walk1_subject1.npz
-    ...
-```
-
-### Dataset Building
-
-Modify `DATASET_ROOT` in `generate_dataset.sh` to point to your dataset root directory, then run the script to generate the dataset:
-```
-bash generate_dataset.sh
-```
-
-The dataset will be generated in the `dataset/` directory, and the code will automatically load these datasets. You can also use the `MEMATH` environment variable to specify the dataset root path.
-
-</details>
-
 ## Training
 
-You can use the provided `train.sh` script to run the full training pipeline. Modify the global configuration section in `train.sh` to set your WandB account and other parameters, then run:
+The training process follows a three-stage curriculum. You must complete each stage sequentially as the subsequent stages depend on the learned weights from the previous ones.
 
+### 1. Train Low-Level Motion Tracking (Stage 1)
+First, train the base policy to track reference motions.
 ```bash
-bash train.sh
+./train_stage1_with_tennis.sh
 ```
 
-Under standard settings, training takes approximately 15 hours on 4× A100 GPUs.
-If GPU memory is constrained, it is recommended to appropriately tune the `NPROC` and `num_envs` parameters in `train.sh` and `cfg/task/G1/G1.yaml`, respectively.
-Such adjustments may increase training time and could affect training performance to some extent.
-
-## Evaluation
-
+### 2. Train Pulse (Latent Representation)
+Once the base policy is trained, run the Pulse training stage to compress the skills into a manageable latent space.
+*(Make sure to update the `teacher_checkpoint_path` in your config to point to the Stage 1 output before running).*
 ```bash
-uv run scripts/eval.py --run_path ${wandb_run_path} -p # p for play
-uv run scripts/eval.py --run_path ${wandb_run_path} -p --export # export the policy to onnx (sim2real)
+./train_pulse_with_tennis.sh
 ```
 
-If you export a deployment policy, the exported checkpoint will be written under `scripts/exports/<task-name>-<timestamp>/`.
-
-To use it in the deployment runtime:
-
-1. Copy the exported policy folder (including `policy.onnx`, `policy.pt`, and `policy.json`) into `sim2real/assets/ckpts/`.
-2. Update `sim2real/config/tracking.yaml` so that `policy_path` points to the new ONNX file.
-
-For the actual deployment-side test procedure:
-
-- see [`sim2real/README.md`](./sim2real/README.md) for `sim2sim/sim2real` testing
-
-That README also explains how to use the UDP motion selector and the VR motion source during deployment.
+### 3. Train High-Level Task (Tennis)
+Finally, train the high-level policy to play tennis using the pre-trained Pulse models.
+*(Make sure to update the `teacher_checkpoint_path` or relevant checkpoint paths in your highlevel config to point to the Pulse output).*
+```bash
+./train_stage4_highlevel_tennis.sh
+```
