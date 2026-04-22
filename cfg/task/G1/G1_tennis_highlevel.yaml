@@ -132,8 +132,8 @@ observation:
 reward:
   _mult_dt_: false
   task:
-    approach_ball: {weight: 10.0, sigma: [0.25, 0.55], root_sigma: [0.45, 0.95], min_bounce_t: 0.03, max_bounce_t: 1.8, rear_margin_y: 0.8, early_preposition_weight: 0.45, root_preposition_blend: 0.85, lateral_stance_offset: 0.30, z_weight: 0.25, z_sigma: [0.08, 0.18], z_activate_net_y: -0.50, z_activate_xy_dist: 0.30}
-    root_towards_ball_speed: {weight: 1.5, target_speed: 1.0, distance_norm: 1.8, min_bounce_t: 0.03, max_bounce_t: 1.8, rear_margin_y: 0.8, lateral_stance_offset: 0.30}
+    approach_ball: {weight: 10.0, max_bounce_t: 1.8, rear_margin_y: 0.8, lateral_stance_offset: 0.30, z_weight: 0.25, z_sigma: [0.08, 0.18], z_activate_net_y: -0.50, z_activate_xy_dist: 0.30}
+    root_towards_ball_speed: {weight: 1.5, target_speed: 1.0, distance_norm: 1.8, max_bounce_t: 1.8, rear_margin_y: 0.8, lateral_stance_offset: 0.30}
     bounce_target: {weight: 30.0, sigma: [0.5, 1.0]}
     ball_target_progress: {weight: 12.0}
     net_progress: {weight: 10.0}
@@ -153,7 +153,7 @@ reward:
     net_clearance: {weight: 100.0}
     ball_velocity_constraint: {weight: 65.0}
     racket_velocity_constraint: {weight: 60.0, min_racket_speed: 3.5}
-    pelvis_facing_forward: {weight: 0.3}
+    pelvis_facing_forward: {weight: 0.001}
   reg:
     highlevel_action_l2: {weight: -1.0e-4}
     joint_torques_l2: {weight: 1.0e-6, enabled: true, joint_names: .*}

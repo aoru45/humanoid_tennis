@@ -15,8 +15,8 @@ algo:
   desired_kl: 0.005
   value_norm: true
   adv_reward_clamp_min: null
-  highlevel_lab_lambda: 0.65
-  pulse_logvar_max: 0.5
+  highlevel_lab_lambda: 2
+  pulse_logvar_max: 2
   highlevel_wrist_residual_enabled: true
   highlevel_wrist_joint_patterns: [right_wrist_.*_joint]
   highlevel_wrist_action_scale: 1.0

@@ -6,19 +6,19 @@ cd "$(dirname "$0")"
 TASK="${TASK:-G1/G1_tennis_highlevel}"
 EXP="${EXP:-highlevel}"
 NUM_ENVS="${NUM_ENVS:-1}"
-NUM_SAMPLES="${NUM_SAMPLES:-2000}"
-BATCH_SIZE="${BATCH_SIZE:-256}"
+NUM_SAMPLES="${NUM_SAMPLES:-2048}"
+BATCH_SIZE="${BATCH_SIZE:-2048}"
 DEVICE="${DEVICE:-cuda:0}"
 OUTPUT="${OUTPUT:-data/tennis_launch_bank/highlevel_launch_bank.npz}"
 
 # Close-feed defaults: bias serves toward robot side to reduce long chasing.
 # All ranges are "min max".
-LAUNCHER_X_RANGE="${LAUNCHER_X_RANGE:--1.2 1.2}"
+LAUNCHER_X_RANGE="${LAUNCHER_X_RANGE:--4.0 4.0}"
 LAUNCHER_Y_RANGE="${LAUNCHER_Y_RANGE:-7.0 8.8}"
-STRIKE_X_RANGE="${STRIKE_X_RANGE:--0.8 0.8}"
-STRIKE_Y_RANGE="${STRIKE_Y_RANGE:--6.0 -4.5}"
-INCOMING_BOUNCE_X_RANGE="${INCOMING_BOUNCE_X_RANGE:--1.4 1.4}"
-INCOMING_BOUNCE_Y_RANGE="${INCOMING_BOUNCE_Y_RANGE:--8.8 -6.4}"
+STRIKE_X_RANGE="${STRIKE_X_RANGE:--4.0 4.0}"
+STRIKE_Y_RANGE="${STRIKE_Y_RANGE:--10.0 -4.0}"
+INCOMING_BOUNCE_X_RANGE="${INCOMING_BOUNCE_X_RANGE:--4.0 4.0}"
+INCOMING_BOUNCE_Y_RANGE="${INCOMING_BOUNCE_Y_RANGE:--10 -4.0}"
 FLIGHT_T_RANGE="${FLIGHT_T_RANGE:-0.70 1.00}"
 LAUNCH_SPEED_RANGE="${LAUNCH_SPEED_RANGE:-12.0 20.0}"
 
@@ -34,6 +34,7 @@ read -r LAUNCH_SPEED_MIN LAUNCH_SPEED_MAX <<< "${LAUNCH_SPEED_RANGE}"
 echo "[INFO] Generating launch bank with close-feed defaults"
 echo "[INFO] task=${TASK} exp=${EXP} output=${OUTPUT}"
 echo "[INFO] strike_y_range=[${STRIKE_Y_MIN}, ${STRIKE_Y_MAX}] incoming_bounce_y_range=[${IN_BOUNCE_Y_MIN}, ${IN_BOUNCE_Y_MAX}]"
+echo "[INFO] Launch bank will include incoming_first_bounce_local + incoming_first_bounce_time_s"
 
 PYTHONUNBUFFERED=1 ./.venv/bin/python scripts/generate_tennis_launch_bank.py \
   --task "${TASK}" \
@@ -51,4 +52,3 @@ PYTHONUNBUFFERED=1 ./.venv/bin/python scripts/generate_tennis_launch_bank.py \
   --flight-t-range "${FLIGHT_T_MIN}" "${FLIGHT_T_MAX}" \
   --launch-speed-range "${LAUNCH_SPEED_MIN}" "${LAUNCH_SPEED_MAX}" \
   --output "${OUTPUT}"
-

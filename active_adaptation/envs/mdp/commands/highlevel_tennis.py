@@ -1775,22 +1775,46 @@ class HighLevelTennisCommand(Command):
         ball_pos_w: torch.Tensor,
         ball_vel_w: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Predict a pre-hit contact target from incoming bounce target and time-to-bounce."""
+        """Predict a fixed pre-hit contact target based on the ball trajectory crossing a fixed height (e.g. z=1.0m)."""
         target_bounce_xy, pred_bounce_t = self._incoming_bounce_target_xy(ball_pos_w, ball_vel_w)
-        contact_t = (
-            pred_bounce_t - float(self.approach_contact_lead_time)
-        ).clamp(float(self.approach_contact_min_t), float(self.approach_contact_max_t))
+        
+        # Calculate time to reach target_height (e.g., 1.0m)
+        target_height = 1.0
+        gravity_z = self.gravity.squeeze(-1)
+        
+        # We need to solve: z0 + vz*t + 0.5*g*t^2 = target_height
+        # 0.5*g*t^2 + vz*t + (z0 - target_height) = 0
+        a = 0.5 * gravity_z
+        b = ball_vel_w[:, 2]
+        c = ball_pos_w[:, 2] - target_height
+        
+        disc = (b.square() - 4.0 * a * c).clamp_min(0.0)
+        sqrt_disc = torch.sqrt(disc)
+        denom = (2.0 * a).clamp(min=-1.0e6, max=-1.0e-6)
+        t1 = (-b - sqrt_disc) / denom
+        t2 = (-b + sqrt_disc) / denom
+        
+        # Select the valid positive time
+        t_candidates = torch.cat([t1.unsqueeze(-1), t2.unsqueeze(-1)], dim=-1)
+        valid_candidates = t_candidates > 1.0e-4
+        t_pos = torch.where(valid_candidates, t_candidates, torch.full_like(t_candidates, float("inf")))
+        contact_t = t_pos.min(dim=-1).values
+        
+        # If the ball doesn't reach target_height, fallback to a time slightly before bounce
+        fallback_t = (pred_bounce_t - float(self.approach_contact_lead_time)).clamp(float(self.approach_contact_min_t), float(self.approach_contact_max_t))
+        valid_contact = torch.isfinite(contact_t)
+        contact_t = torch.where(valid_contact, contact_t, fallback_t)
+        
         contact_valid = pred_bounce_t > float(self.approach_contact_min_t + 1.0e-3)
 
-        ratio = (contact_t / pred_bounce_t.clamp_min(float(self.approach_contact_min_t))).unsqueeze(-1).clamp(0.0, 1.0)
-        contact_xy = ball_pos_w[:, :2] + (target_bounce_xy - ball_pos_w[:, :2]) * ratio
-
-        gravity_z = self.gravity.squeeze(-1)
+        contact_xy = ball_pos_w[:, :2] + ball_vel_w[:, :2] * contact_t.unsqueeze(-1)
+        
         contact_z = (
             ball_pos_w[:, 2]
             + ball_vel_w[:, 2] * contact_t
             + 0.5 * gravity_z * contact_t.square()
         ).clamp_min(self.ball_radius + 0.02)
+        
         contact_pos_w = torch.cat([contact_xy, contact_z.unsqueeze(-1)], dim=-1)
         return contact_pos_w, contact_t, contact_valid, target_bounce_xy, pred_bounce_t
 
@@ -1823,13 +1847,8 @@ class HighLevelTennisCommand(Command):
     @reward
     def approach_ball(
         self,
-        sigma: Sequence[float] | None = (0.25, 0.55),
-        root_sigma: Sequence[float] | None = (0.45, 0.95),
-        min_bounce_t: float = 0.03,
         max_bounce_t: float = 1.80,
         rear_margin_y: float = 0.8,
-        early_preposition_weight: float = 0.6,
-        root_preposition_blend: float = 0.85,
         lateral_stance_offset: float = 0.30,
         z_weight: float = 0.6,
         z_sigma: Sequence[float] | None = (0.08, 0.18),
@@ -1837,8 +1856,6 @@ class HighLevelTennisCommand(Command):
         z_activate_xy_dist: float = 0.55,
         z_activate_contact_t: float = 0.45,
     ):
-        # Pre-position the racket at the final incoming bounce location (XY only).
-        # During training we anneal from launch-oracle bounce to online predicted bounce.
         ball_pos_w = self.ball.data.root_link_pos_w
         ball_vel_w = self.ball.data.root_link_lin_vel_w
         root_pos_w = self.asset.data.root_link_pos_w
@@ -1855,20 +1872,18 @@ class HighLevelTennisCommand(Command):
             lateral_stance_offset=lateral_stance_offset,
         )
 
-        # Two-stage XY shaping:
-        # - early phase (large time-to-bounce): prioritize root pre-positioning;
-        # - late phase: prioritize racket XY interception.
-        early_scale = (contact_t / max(float(max_bounce_t), 1.0e-3)).clamp(0.0, 1.0).unsqueeze(-1)
-        preposition_alpha = (float(root_preposition_blend) * early_scale).clamp(0.0, 1.0)
-        racket_xy_error = (racket_pos_w[:, :2] - contact_pos_w[:, :2]).norm(dim=-1, keepdim=True)
+        # Force root movement: Reward is linear, dropping to 0 at 1.0m error
         root_xy_error = (root_pos_w[:, :2] - root_target_xy).norm(dim=-1, keepdim=True)
-        racket_xy_rew = _exp_reward(racket_xy_error, sigma)
-        root_xy_rew = _exp_reward(root_xy_error, root_sigma)
-        rew = (1.0 - preposition_alpha) * racket_xy_rew + preposition_alpha * root_xy_rew
-        rew = rew * (1.0 + float(early_preposition_weight) * early_scale)
+        root_xy_rew = (1.0 - root_xy_error / 1.0).clamp_min(0.0)
 
-        # Stage-2 shaping:
-        # once the ball is on robot side of net, or XY is close enough, encourage racket height alignment.
+        # Racket only gets rewarded if root is close enough (e.g., error < 0.6m)
+        racket_xy_error = (racket_pos_w[:, :2] - contact_pos_w[:, :2]).norm(dim=-1, keepdim=True)
+        racket_xy_rew = (1.0 - racket_xy_error / 0.8).clamp_min(0.0)
+        racket_gate = (root_xy_error < 0.6).float()
+        
+        rew = root_xy_rew + racket_gate * racket_xy_rew
+
+        # Z shaping
         racket_ball_xy_dist = (racket_pos_w[:, :2] - ball_pos_w[:, :2]).norm(dim=-1, keepdim=True)
         z_active = (
             (ball_pos_l[:, 1] <= float(z_activate_net_y))
@@ -1885,7 +1900,6 @@ class HighLevelTennisCommand(Command):
             & (~self.fail_net)
             & (~self.fail_out)
             & contact_valid
-            & (contact_t >= float(min_bounce_t))
             & (contact_t <= float(max_bounce_t))
             & (ball_pos_w[:, 1] > (root_pos_w[:, 1] - float(rear_margin_y)))
         ).float().unsqueeze(-1)
@@ -1894,8 +1908,6 @@ class HighLevelTennisCommand(Command):
     @reward
     def root_preposition_xy(
         self,
-        sigma: Sequence[float] | None = (0.55, 1.10),
-        min_bounce_t: float = 0.03,
         max_bounce_t: float = 1.80,
         rear_margin_y: float = 0.8,
         early_preposition_weight: float = 0.5,
@@ -1915,8 +1927,10 @@ class HighLevelTennisCommand(Command):
             racket_pos_w=racket_pos_w,
             lateral_stance_offset=lateral_stance_offset,
         )
+        
+        # Use linear reward to force movement, drops to 0 at 1.0m
         root_xy_error = (root_pos_w[:, :2] - root_target_xy).norm(dim=-1, keepdim=True)
-        rew = _exp_reward(root_xy_error, sigma)
+        rew = (1.0 - root_xy_error / 1.0).clamp_min(0.0)
 
         early_scale = (contact_t / max(float(max_bounce_t), 1.0e-3)).clamp(0.0, 1.0).unsqueeze(-1)
         rew = rew * (1.0 + float(early_preposition_weight) * early_scale)
@@ -1927,7 +1941,6 @@ class HighLevelTennisCommand(Command):
             & (~self.fail_net)
             & (~self.fail_out)
             & contact_valid
-            & (contact_t >= float(min_bounce_t))
             & (contact_t <= float(max_bounce_t))
             & (ball_pos_w[:, 1] > (root_pos_w[:, 1] - float(rear_margin_y)))
         ).float().unsqueeze(-1)
@@ -1938,7 +1951,6 @@ class HighLevelTennisCommand(Command):
         self,
         target_speed: float = 1.0,
         distance_norm: float = 1.8,
-        min_bounce_t: float = 0.03,
         max_bounce_t: float = 1.80,
         rear_margin_y: float = 0.8,
         lateral_stance_offset: float = 0.30,
@@ -1975,7 +1987,6 @@ class HighLevelTennisCommand(Command):
             & (~self.fail_net)
             & (~self.fail_out)
             & contact_valid
-            & (contact_t >= float(min_bounce_t))
             & (contact_t <= float(max_bounce_t))
             & (ball_pos_w[:, 1] > (root_pos_w[:, 1] - float(rear_margin_y)))
         ).float().unsqueeze(-1)

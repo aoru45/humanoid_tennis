@@ -1,11 +1,12 @@
 import argparse
 import json
+import time
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from functools import partial
 from pathlib import Path
 
 import numpy as np
 import torch
-from scipy.spatial.transform import Rotation as sRot
 
 from active_adaptation.utils.motion import MotionDataset
 
@@ -144,6 +145,46 @@ def _convert_wxyz_to_xyzw(quat_wxyz: np.ndarray) -> np.ndarray:
     return np.concatenate([quat_wxyz[..., 1:], quat_wxyz[..., 0:1]], axis=-1)
 
 
+def _normalize_quat_wxyz(quat_wxyz: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    norm = np.linalg.norm(quat_wxyz, axis=-1, keepdims=True)
+    return quat_wxyz / np.clip(norm, eps, None)
+
+
+def _quat_conjugate_wxyz(quat_wxyz: np.ndarray) -> np.ndarray:
+    out = quat_wxyz.copy()
+    out[..., 1:] *= -1.0
+    return out
+
+
+def _quat_mul_wxyz(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    w1 = q1[..., 0]
+    x1 = q1[..., 1]
+    y1 = q1[..., 2]
+    z1 = q1[..., 3]
+    w2 = q2[..., 0]
+    x2 = q2[..., 1]
+    y2 = q2[..., 2]
+    z2 = q2[..., 3]
+    return np.stack(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        axis=-1,
+    )
+
+
+def _quat_apply_inverse_wxyz(root_quat_wxyz: np.ndarray, vec: np.ndarray) -> np.ndarray:
+    # root_quat_wxyz: [T, 4], vec: [T, B, 3]
+    qv = root_quat_wxyz[:, None, 1:]  # [T,1,3]
+    qw = root_quat_wxyz[:, None, 0:1]  # [T,1,1]
+    # Apply inverse rotation by using conjugate quaternion in vector-rotation form.
+    t = 2.0 * np.cross(-qv, vec)
+    return vec + qw * t + np.cross(-qv, t)
+
+
 def _extract_scalar_fps(value, default: float = 50.0) -> float:
     arr = np.asarray(value)
     if arr.size == 0:
@@ -185,17 +226,16 @@ def _convert_single_npz(src: Path, dst: Path, output_fps: float) -> None:
         )
 
     root_pos = body_pos_w[:, 0, :]
-    root_quat_wxyz = body_quat_w[:, 0, :]
+    root_quat_wxyz = _normalize_quat_wxyz(np.asarray(body_quat_w[:, 0, :], dtype=np.float32))
+    body_quat_wxyz = _normalize_quat_wxyz(np.asarray(body_quat_w, dtype=np.float32))
     root_rot_xyzw = _convert_wxyz_to_xyzw(root_quat_wxyz).astype(np.float32)
 
-    root_rot_m = sRot.from_quat(root_rot_xyzw).as_matrix().astype(np.float32)
     rel_world_pos = body_pos_w - root_pos[:, None, :]
-    local_body_pos = np.einsum("tji,tbj->tbi", root_rot_m, rel_world_pos).astype(np.float32)
+    local_body_pos = _quat_apply_inverse_wxyz(root_quat_wxyz, rel_world_pos).astype(np.float32)
 
-    body_rot_xyzw = _convert_wxyz_to_xyzw(body_quat_w).astype(np.float32)
-    body_rot = sRot.from_quat(body_rot_xyzw.reshape(-1, 4))
-    root_rot_rep = sRot.from_quat(np.repeat(root_rot_xyzw, body_quat_w.shape[1], axis=0))
-    local_rot_xyzw = (root_rot_rep.inv() * body_rot).as_quat().reshape(body_quat_w.shape).astype(np.float32)
+    local_rot_wxyz = _quat_mul_wxyz(_quat_conjugate_wxyz(root_quat_wxyz)[:, None, :], body_quat_wxyz)
+    local_rot_wxyz = _normalize_quat_wxyz(local_rot_wxyz.astype(np.float32, copy=False))
+    local_rot_xyzw = _convert_wxyz_to_xyzw(local_rot_wxyz).astype(np.float32)
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -209,6 +249,17 @@ def _convert_single_npz(src: Path, dst: Path, output_fps: float) -> None:
         body_names=np.asarray(BODY_NAMES),
         joint_names=np.asarray(JOINT_NAMES),
     )
+
+
+def _convert_single_npz_task(args: tuple[str, str, float]) -> tuple[str, str, str]:
+    src_s, dst_s, output_fps = args
+    src = Path(src_s)
+    dst = Path(dst_s)
+    try:
+        _convert_single_npz(src, dst, output_fps=float(output_fps))
+        return "OK", src.name, ""
+    except Exception as exc:
+        return "FAIL", src.name, str(exc)
 
 
 def _build_mem_dataset(converted_root: Path, mem_path: Path, segment_len: int, disable_filter: bool) -> None:
@@ -241,6 +292,14 @@ def main():
     parser.add_argument("--overwrite", action="store_true", default=False, help="Overwrite existing converted files.")
     parser.add_argument("--max-files", type=int, default=None, help="Convert only first N files (for quick checks).")
     parser.add_argument(
+        "--input-list",
+        type=str,
+        default=None,
+        help="Optional text file listing npz filenames or absolute paths to convert (one per line).",
+    )
+    parser.add_argument("--workers", type=int, default=1, help="Parallel workers for npz conversion.")
+    parser.add_argument("--progress-sec", type=float, default=5.0, help="Progress heartbeat interval in seconds.")
+    parser.add_argument(
         "--build-mem-path",
         type=str,
         default=None,
@@ -260,35 +319,135 @@ def main():
     if not input_dir.exists():
         raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
 
-    files = sorted(input_dir.glob("*.npz"))
+    if args.input_list:
+        list_path = Path(args.input_list)
+        if not list_path.exists():
+            raise FileNotFoundError(f"--input-list not found: {list_path}")
+        files = []
+        for raw in list_path.read_text(encoding="utf-8").splitlines():
+            item = raw.strip()
+            if not item:
+                continue
+            p = Path(item)
+            if not p.is_absolute():
+                p = input_dir / p
+            files.append(p)
+        files = sorted(files)
+    else:
+        files = sorted(input_dir.glob("*.npz"))
     if args.max_files is not None:
         files = files[: max(0, int(args.max_files))]
     if len(files) == 0:
         raise RuntimeError(f"No npz files found in {input_dir}")
 
+    workers = max(1, int(args.workers))
+    progress_sec = max(0.2, float(args.progress_sec))
+
     converted = 0
     skipped = 0
     failed = []
-    for src in files:
+
+    tasks: list[tuple[str, str, float]] = []
+    scan_last_log = 0.0
+    for idx, src in enumerate(files, start=1):
         dst = output_dir / src.name
         if dst.exists() and not args.overwrite:
             skipped += 1
-            continue
-        try:
-            _convert_single_npz(src, dst, output_fps=float(args.output_fps))
-            converted += 1
-        except Exception as exc:
-            failed.append((src.name, str(exc)))
+        else:
+            tasks.append((str(src), str(dst), float(args.output_fps)))
+
+        now = time.time()
+        if (now - scan_last_log) >= progress_sec:
+            scan_last_log = now
+            queued = len(tasks)
+            print(
+                f"[convert] scan progress scanned={idx}/{len(files)} queued={queued} "
+                f"skipped={skipped} overwrite={bool(args.overwrite)}",
+                flush=True,
+            )
+
+    print(
+        f"[convert] scan done total={len(files)} queued={len(tasks)} skipped={skipped}",
+        flush=True,
+    )
+
+    start_ts = time.time()
+    if workers <= 1 or len(tasks) <= 1:
+        last_log = 0.0
+        for idx, (src_s, dst_s, out_fps) in enumerate(tasks, start=1):
+            status, name, err = _convert_single_npz_task((src_s, dst_s, out_fps))
+            if status == "OK":
+                converted += 1
+            else:
+                failed.append((name, err))
+
+            now = time.time()
+            if (now - last_log) >= progress_sec:
+                last_log = now
+                elapsed = int(now - start_ts)
+                done = converted + len(failed)
+                print(
+                    f"[convert] progress done={done}/{len(tasks)} converted={converted} "
+                    f"failed={len(failed)} skipped={skipped} elapsed={elapsed}s"
+                ,
+                    flush=True,
+                )
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            total_tasks = len(tasks)
+            max_in_flight = max(64, workers * 4)
+            pending = set()
+            submit_idx = 0
+
+            def _submit_until_full() -> None:
+                nonlocal submit_idx
+                while submit_idx < total_tasks and len(pending) < max_in_flight:
+                    fut = ex.submit(_convert_single_npz_task, tasks[submit_idx])
+                    pending.add(fut)
+                    submit_idx += 1
+
+            _submit_until_full()
+            last_log = 0.0
+            last_done = -1
+            while pending:
+                done_set, pending = wait(pending, timeout=progress_sec, return_when=FIRST_COMPLETED)
+                for fut in done_set:
+                    status, name, err = fut.result()
+                    if status == "OK":
+                        converted += 1
+                    else:
+                        failed.append((name, err))
+                _submit_until_full()
+                now = time.time()
+                done = converted + len(failed)
+                should_log = (now - last_log) >= progress_sec or (done == len(tasks) and done != last_done)
+                if should_log:
+                    last_log = now
+                    elapsed = int(now - start_ts)
+                    last_done = done
+                    rate = (done / max(now - start_ts, 1e-6))
+                    remain = max(total_tasks - done, 0)
+                    eta_str = "NA" if rate <= 1e-6 else f"{int(remain / rate)}s"
+                    print(
+                        f"[convert] progress done={done}/{len(tasks)} converted={converted} "
+                        f"failed={len(failed)} skipped={skipped} workers={workers} "
+                        f"submitted={submit_idx}/{total_tasks} inflight={len(pending)} "
+                        f"rate={rate:.1f}/s eta={eta_str} elapsed={elapsed}s"
+                    ,
+                        flush=True,
+                    )
 
     print(
         f"[convert] total={len(files)} converted={converted} skipped={skipped} failed={len(failed)} output={output_dir}"
+    ,
+        flush=True,
     )
     if failed:
-        print("[convert] failed examples:")
+        print("[convert] failed examples:", flush=True)
         for name, err in failed[:10]:
-            print(f"  - {name}: {err}")
+            print(f"  - {name}: {err}", flush=True)
         if len(failed) > 10:
-            print(f"  ... and {len(failed) - 10} more")
+            print(f"  ... and {len(failed) - 10} more", flush=True)
 
     if args.build_mem_path:
         mem_path = Path(args.build_mem_path)
@@ -305,12 +464,14 @@ def main():
                 meta = json.load(f)
             print(
                 f"[mem] path={mem_path} segments={len(meta.get('starts', []))} joints={len(meta.get('joint_names', []))}"
+                ,
+                flush=True,
             )
         if id_label_path.exists():
             with id_label_path.open("r", encoding="utf-8") as f:
                 labels = json.load(f)
             unique_files = len({Path(x["source_path"]).name for x in labels})
-            print(f"[mem] accepted_unique_files={unique_files}")
+            print(f"[mem] accepted_unique_files={unique_files}", flush=True)
 
 
 if __name__ == "__main__":

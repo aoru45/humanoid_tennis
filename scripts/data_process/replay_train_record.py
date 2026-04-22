@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from active_adaptation.assets import get_robot_cfg, get_tennis_ball_cfg, get_tennis_court_cfg
+from active_adaptation.utils.math import quat_apply
 
 
 def _read_scalar(npz, key, default):
@@ -193,6 +194,20 @@ def _to_cpu_wp_data(wp_data):
         return wp_data
 
 
+def _compute_racket_center_w(
+    *,
+    robot,
+    racket_body_id: int,
+    racket_center_offset: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute racket body origin and reward-consistent racket center in world frame."""
+    body_pos_w = robot.data.body_link_pos_w[:, racket_body_id]
+    body_quat_w = robot.data.body_link_quat_w[:, racket_body_id]
+    offset_local = racket_center_offset.unsqueeze(0).expand(body_pos_w.shape[0], -1)
+    center_pos_w = body_pos_w + quat_apply(body_quat_w, offset_local)
+    return body_pos_w, center_pos_w
+
+
 
 
 def _find_launch_events(
@@ -340,6 +355,26 @@ def main():
         default=0.8,
         help="Launch detection threshold: ball z > this value.",
     )
+    parser.add_argument(
+        "--racket-body-name",
+        type=str,
+        default="tennis_racket_mount",
+        help="Racket body name used by reward center computation.",
+    )
+    parser.add_argument(
+        "--racket-center-offset",
+        type=float,
+        nargs=3,
+        default=(0.1025, -0.004, 0.4),
+        metavar=("OX", "OY", "OZ"),
+        help="Local XYZ offset from racket body origin to reward racket center.",
+    )
+    parser.add_argument(
+        "--racket-center-radius",
+        type=float,
+        default=0.045,
+        help="Visualization sphere radius for racket center debug overlay.",
+    )
     args = parser.parse_args()
 
     if args.speed <= 0:
@@ -453,12 +488,28 @@ def main():
     _hide_court_overlay_geoms(sim)
 
     viewer, viser_scene = _create_viewer(sim)
+    robot = scene["robot"]
+    racket_body_ids, racket_body_names = robot.find_bodies(args.racket_body_name)
+    if len(racket_body_ids) != 1:
+        raise ValueError(
+            f"Expected exactly one racket body from '{args.racket_body_name}', got {list(racket_body_names)}."
+        )
+    racket_body_id = int(racket_body_ids[0])
+    racket_center_offset = torch.tensor(args.racket_center_offset, device=device, dtype=torch.float32)
+    if racket_center_offset.numel() != 3:
+        raise ValueError(f"--racket-center-offset must provide exactly 3 floats, got {args.racket_center_offset}.")
+
     slot_options = [str(i) for i in range(int(num_env_slots))]
     env_dropdown = viewer.gui.add_dropdown(
         "Env Slot",
         options=slot_options,
         initial_value=str(effective_env_index),
         hint="Recorded env slot index (not global env_id).",
+    )
+    racket_center_debug_checkbox = viewer.gui.add_checkbox(
+        "Show Racket Center Debug",
+        initial_value=False,
+        hint="Draw racket mount origin + reward racket center (body + local offset).",
     )
 
     state: dict[str, object] = {
@@ -562,12 +613,19 @@ def main():
         f"Replay loaded: steps={steps}, env_slots={int(num_env_slots)}, robot={robot_name}, "
         f"device={device}, step_dt={step_dt:.4f}, physics_dt={physics_dt:.4f}"
     )
+    print(
+        "[INFO] Racket center debug params: "
+        f"body='{args.racket_body_name}' (id={racket_body_id}), "
+        f"offset=({float(racket_center_offset[0]):+.4f}, {float(racket_center_offset[1]):+.4f}, {float(racket_center_offset[2]):+.4f})"
+    )
     print(f"[INFO] Base playback frame range: [{base_start_step}, {base_end_step}) ({base_end_step - base_start_step} frames).")
     print("[INFO] Change `Env Slot` in GUI to switch replay target without restarting.")
+    print("[INFO] Toggle `Show Racket Center Debug` in GUI to visualize reward racket-center geometry.")
     print("Press Ctrl+C to exit.")
 
     frame_dt = float(step_dt) / float(args.speed)
     start_time = time.perf_counter()
+    racket_debug_prev_on = False
     try:
         while True:
             desired_slot = int(env_dropdown.value)
@@ -583,6 +641,44 @@ def main():
             sim.data.qvel[:] = qvel_t
             sim.forward()
             scene.update(physics_dt)
+
+            show_racket_debug = bool(racket_center_debug_checkbox.value)
+            if show_racket_debug:
+                if not viser_scene.debug_visualization_enabled:
+                    viser_scene.debug_visualization_enabled = True
+                viser_scene.clear()
+                racket_mount_w, racket_center_w = _compute_racket_center_w(
+                    robot=robot,
+                    racket_body_id=racket_body_id,
+                    racket_center_offset=racket_center_offset,
+                )
+                ball_pos_w = scene["tennis_ball"].data.root_link_pos_w
+                center_radius = max(float(args.racket_center_radius), 1.0e-3)
+                viser_scene.add_sphere(
+                    racket_mount_w[0],
+                    radius=center_radius * 0.55,
+                    color=(1.0, 0.6, 0.0, 0.95),
+                )
+                viser_scene.add_sphere(
+                    racket_center_w[0],
+                    radius=center_radius,
+                    color=(0.1, 1.0, 0.1, 0.95),
+                )
+                viser_scene.add_cylinder(
+                    racket_mount_w[0],
+                    racket_center_w[0],
+                    radius=max(center_radius * 0.20, 0.003),
+                    color=(0.1, 1.0, 0.1, 0.80),
+                )
+                viser_scene.add_sphere(
+                    ball_pos_w[0],
+                    radius=max(center_radius * 0.45, 0.015),
+                    color=(0.15, 0.55, 1.0, 0.90),
+                )
+            elif racket_debug_prev_on:
+                viser_scene.clear()
+            racket_debug_prev_on = show_racket_debug
+
             viser_scene.update(_to_cpu_wp_data(sim.data))
 
             state["segment_idx"] = int(state["segment_idx"]) + 1
