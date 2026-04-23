@@ -19,8 +19,9 @@ fi
 DEFAULT_HYDRA_RUN_DIR="./outputs/\${now:%Y-%m-%d}/\${now:%H-%M-%S}-${RUN_NAME_SLUG}"
 HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-$DEFAULT_HYDRA_RUN_DIR}"
 
-STAGE_PULSE_CKPT="${STAGE_PULSE_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-18/01-01-39-tracking-pulse-tennis-0418-0101/wandb/run-20260418_010213-fy4oipc6/files/checkpoint_final.pt}"
-# STAGE_PULSE_CKPT="${STAGE_PULSE_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-17/23-05-53-tracking-pulse-only-tennis-0417-2305/wandb/run-20260417_230629-nxafmogr/files/checkpoint_final.pt}"
+# STAGE_PULSE_CKPT="${STAGE_PULSE_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-18/pulse_w_racket/wandb/run-20260418_010213-fy4oipc6/files/checkpoint_final.pt}"
+STAGE_PULSE_CKPT="${STAGE_PULSE_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/pulse_more_smooth/checkpoint_final.pt}"
+# STAGE_PULSE_CKPT="${STAGE_PULSE_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-17/pulse_w_racket_tennis_only/wandb/run-20260417_230629-nxafmogr/files/checkpoint_final.pt}"
 # STAGE_PULSE_CKPT="${STAGE_PULSE_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/pulse_more/checkpoint_38700.pt}"
 LAUNCH_BANK_FILE="${LAUNCH_BANK_FILE:-/mnt/data/xueaoru/motion_tracking/data/tennis_launch_bank/highlevel_launch_bank.npz}"
 

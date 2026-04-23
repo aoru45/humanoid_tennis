@@ -1,4 +1,6 @@
 import argparse
+from pathlib import Path
+import sys
 import time
 from types import SimpleNamespace
 
@@ -27,6 +29,21 @@ def _read_str(npz, key, default):
             return default
         return str(value.reshape(-1)[0])
     return str(value)
+
+
+def _find_latest_train_record(project_root: Path) -> Path:
+    outputs_dir = project_root / "outputs"
+    if not outputs_dir.exists():
+        raise FileNotFoundError(f"outputs directory not found: {outputs_dir}")
+
+    candidates: list[Path] = []
+    for pattern in ("*/*/train_records/*.npz", "*/train_records/*.npz", "train_records/*.npz"):
+        candidates.extend(outputs_dir.glob(pattern))
+    candidates = [p for p in candidates if p.is_file()]
+    if not candidates:
+        raise FileNotFoundError(f"No train record npz found under: {outputs_dir}")
+
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 def _build_scene(
@@ -208,6 +225,77 @@ def _compute_racket_center_w(
     return body_pos_w, center_pos_w
 
 
+def _axis_vector(axis_name: str, *, device: str) -> torch.Tensor:
+    key = axis_name.lower()
+    if key == "x":
+        vec = (1.0, 0.0, 0.0)
+    elif key == "y":
+        vec = (0.0, 1.0, 0.0)
+    elif key == "z":
+        vec = (0.0, 0.0, 1.0)
+    else:
+        raise ValueError(f"Unsupported axis '{axis_name}', expected one of: x, y, z.")
+    return torch.tensor(vec, device=device, dtype=torch.float32)
+
+
+def _infer_racket_face_normal_local_from_collision_geom(*, sim, device: str) -> tuple[torch.Tensor, str]:
+    """Infer racket face normal in racket-body local frame from thin axis of collision geom."""
+    fallback = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=torch.float32)
+    try:
+        import mujoco
+
+        model = sim.mj_model
+        geom_id = -1
+        geom_name = ""
+        for name in ("robot/tennis_racket_collision", "tennis_racket_collision"):
+            try:
+                gid = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name))
+            except Exception:
+                gid = -1
+            if gid >= 0:
+                geom_id = gid
+                geom_name = name
+                break
+        if geom_id < 0:
+            return fallback, "fallback:z (collision geom not found)"
+
+        geom_size = np.asarray(model.geom_size[geom_id], dtype=np.float32)[:3]
+        thin_axis = int(np.argmin(np.abs(geom_size)))
+        axis_geom = np.zeros((3,), dtype=np.float32)
+        axis_geom[thin_axis] = 1.0
+        geom_quat = np.asarray(model.geom_quat[geom_id], dtype=np.float32)[:4]
+
+        q = torch.tensor(geom_quat, device=device, dtype=torch.float32).unsqueeze(0)
+        v = torch.tensor(axis_geom, device=device, dtype=torch.float32).unsqueeze(0)
+        axis_local = quat_apply(q, v).squeeze(0)
+        axis_local = axis_local / axis_local.norm().clamp_min(1.0e-6)
+        desc = (
+            f"auto:{geom_name}, thin_axis={thin_axis}, size=({geom_size[0]:.4f},{geom_size[1]:.4f},{geom_size[2]:.4f})"
+        )
+        return axis_local, desc
+    except Exception:
+        return fallback, "fallback:z (auto infer failed)"
+
+
+def _compute_racket_face_dirs_w(
+    *,
+    robot,
+    racket_body_id: int,
+    racket_center_offset: torch.Tensor,
+    face_axis_local: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return racket center, +face dir, -face dir in world frame."""
+    body_pos_w = robot.data.body_link_pos_w[:, racket_body_id]
+    body_quat_w = robot.data.body_link_quat_w[:, racket_body_id]
+    offset_local = racket_center_offset.unsqueeze(0).expand(body_pos_w.shape[0], -1)
+    center_pos_w = body_pos_w + quat_apply(body_quat_w, offset_local)
+    face_axis = face_axis_local.unsqueeze(0).expand(body_pos_w.shape[0], -1)
+    face_plus_dir_w = quat_apply(body_quat_w, face_axis)
+    face_plus_dir_w = face_plus_dir_w / face_plus_dir_w.norm(dim=-1, keepdim=True).clamp_min(1.0e-6)
+    face_minus_dir_w = -face_plus_dir_w
+    return center_pos_w, face_plus_dir_w, face_minus_dir_w
+
+
 
 
 def _find_launch_events(
@@ -288,7 +376,16 @@ def _summarize_launch_events(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("record", type=str, help="Path to train record npz file.")
+    parser.add_argument("record", type=str, nargs="?", help="Path to train record npz file.")
+    parser.add_argument(
+        "--new",
+        action="store_true",
+        default=False,
+        help=(
+            "Auto-select latest train_records/*.npz under outputs/, and enable convenient defaults: "
+            "--env-index 0 --list-launches --auto-select-env-with-launch --cycle-launches."
+        ),
+    )
     parser.add_argument("--robot", type=str, default=None, help="Override robot name.")
     parser.add_argument("--device", type=str, default=None, help="Simulation device, e.g. cuda:0 or cpu.")
     parser.add_argument("--step-dt", type=float, default=None, help="Override playback frame dt.")
@@ -378,7 +475,46 @@ def main():
         default=0.045,
         help="Visualization sphere radius for racket center debug overlay.",
     )
+    parser.add_argument(
+        "--racket-face-axis",
+        type=str,
+        default="auto",
+        choices=("auto", "x", "y", "z"),
+        help="Local racket-body axis for +face debug direction; 'auto' infers from tennis_racket_collision thin axis.",
+    )
+    parser.add_argument(
+        "--racket-face-length",
+        type=float,
+        default=0.22,
+        help="Debug line length for racket +face/-face directions.",
+    )
     args = parser.parse_args()
+    argv = set(sys.argv[1:])
+
+    if args.new:
+        if args.record is None:
+            project_root = Path(__file__).resolve().parents[2]
+            latest_record = _find_latest_train_record(project_root)
+            args.record = str(latest_record)
+            print(f"[INFO] --new selected latest record: {latest_record}")
+        if "--env-index" not in argv:
+            args.env_index = 0
+        if "--list-launches" not in argv:
+            args.list_launches = True
+        if "--auto-select-env-with-launch" not in argv:
+            args.auto_select_env_with_launch = True
+        if ("--cycle-launches" not in argv) and ("--no-cycle-launches" not in argv):
+            args.cycle_launches = True
+
+    if args.record is None:
+        parser.error("record is required unless --new is specified.")
+
+    record_path = Path(args.record).expanduser()
+    if not record_path.is_absolute():
+        record_path = (Path.cwd() / record_path).resolve()
+    if not record_path.exists():
+        raise FileNotFoundError(f"Record file not found: {record_path}")
+    print(f"[INFO] Replay record: {record_path}")
 
     if args.speed <= 0:
         raise ValueError("--speed must be > 0.")
@@ -389,7 +525,7 @@ def main():
         print("[WARN] --cycle-launches is incompatible with --tail-after-launch; forcing --tail-after-launch=False.")
         args.tail_after_launch = False
 
-    with np.load(args.record, allow_pickle=False) as npz:
+    with np.load(str(record_path), allow_pickle=False) as npz:
         qpos = npz["qpos"]
         qvel = npz["qvel"]
         root_state_full = npz["root_state"] if "root_state" in npz else None
@@ -507,6 +643,15 @@ def main():
     racket_center_offset = torch.tensor(args.racket_center_offset, device=device, dtype=torch.float32)
     if racket_center_offset.numel() != 3:
         raise ValueError(f"--racket-center-offset must provide exactly 3 floats, got {args.racket_center_offset}.")
+    if str(args.racket_face_axis).lower() == "auto":
+        racket_face_axis_local, face_axis_desc = _infer_racket_face_normal_local_from_collision_geom(
+            sim=sim,
+            device=device,
+        )
+    else:
+        racket_face_axis_local = _axis_vector(args.racket_face_axis, device=device)
+        face_axis_desc = f"manual:+{str(args.racket_face_axis).upper()}"
+    racket_face_length = max(float(args.racket_face_length), 1.0e-3)
 
     slot_options = [str(i) for i in range(int(num_env_slots))]
     env_dropdown = viewer.gui.add_dropdown(
@@ -633,6 +778,10 @@ def main():
         f"body='{args.racket_body_name}' (id={racket_body_id}), "
         f"offset=({float(racket_center_offset[0]):+.4f}, {float(racket_center_offset[1]):+.4f}, {float(racket_center_offset[2]):+.4f})"
     )
+    print(
+        "[INFO] Racket face debug colors: +axis(red), -axis(blue), "
+        f"axis={face_axis_desc}, vec=({float(racket_face_axis_local[0]):+.3f}, {float(racket_face_axis_local[1]):+.3f}, {float(racket_face_axis_local[2]):+.3f}), length={racket_face_length:.3f}m."
+    )
     print(f"[INFO] Base playback frame range: [{base_start_step}, {base_end_step}) ({base_end_step - base_start_step} frames).")
     print("[INFO] Change `Env Slot` in GUI to switch replay target without restarting.")
     print("[INFO] Toggle `Show Racket Center Debug` in GUI to visualize reward racket-center geometry.")
@@ -667,8 +816,17 @@ def main():
                     racket_body_id=racket_body_id,
                     racket_center_offset=racket_center_offset,
                 )
+                _, face_plus_dir_w, face_minus_dir_w = _compute_racket_face_dirs_w(
+                    robot=robot,
+                    racket_body_id=racket_body_id,
+                    racket_center_offset=racket_center_offset,
+                    face_axis_local=racket_face_axis_local,
+                )
                 ball_pos_w = scene["tennis_ball"].data.root_link_pos_w
                 center_radius = max(float(args.racket_center_radius), 1.0e-3)
+                face_len = float(racket_face_length)
+                face_plus_end_w = racket_center_w + face_plus_dir_w * face_len
+                face_minus_end_w = racket_center_w + face_minus_dir_w * face_len
                 viser_scene.add_sphere(
                     racket_mount_w[0],
                     radius=center_radius * 0.55,
@@ -684,6 +842,28 @@ def main():
                     racket_center_w[0],
                     radius=max(center_radius * 0.20, 0.003),
                     color=(0.1, 1.0, 0.1, 0.80),
+                )
+                viser_scene.add_cylinder(
+                    racket_center_w[0],
+                    face_plus_end_w[0],
+                    radius=max(center_radius * 0.16, 0.0028),
+                    color=(1.0, 0.15, 0.15, 0.95),
+                )
+                viser_scene.add_cylinder(
+                    racket_center_w[0],
+                    face_minus_end_w[0],
+                    radius=max(center_radius * 0.16, 0.0028),
+                    color=(0.15, 0.35, 1.0, 0.95),
+                )
+                viser_scene.add_sphere(
+                    face_plus_end_w[0],
+                    radius=max(center_radius * 0.42, 0.010),
+                    color=(1.0, 0.15, 0.15, 0.95),
+                )
+                viser_scene.add_sphere(
+                    face_minus_end_w[0],
+                    radius=max(center_radius * 0.42, 0.010),
+                    color=(0.15, 0.35, 1.0, 0.95),
                 )
                 viser_scene.add_sphere(
                     ball_pos_w[0],

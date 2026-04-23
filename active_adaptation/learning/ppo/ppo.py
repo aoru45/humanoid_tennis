@@ -1027,16 +1027,23 @@ class PPOPolicy(TensorDictModuleBase):
         kl = self._diag_gaussian_kl(post_mu, post_logvar, prior_mu, prior_logvar)
         kl_loss = torch.mean(kl * valid)
 
-        regu_loss = torch.zeros((), device=self.device)
+        regu_mu_loss = torch.zeros((), device=self.device)
+        regu_z_loss = torch.zeros((), device=self.device)
         if self.cfg.pulse_use_temporal_reg and post_mu.ndim >= 3:
             regu_valid = (~mb["is_init"][:, 1:]) & (~mb["is_init"][:, :-1])
             if done is not None:
                 regu_valid = regu_valid & (~done[:, :-1])
             if regu_valid.any():
                 regu_valid = regu_valid.float()
-                regu_loss = torch.mean(
+                regu_mu_loss = torch.mean(
                     torch.mean((post_mu[:, 1:] - post_mu[:, :-1]).square(), dim=-1, keepdim=True) * regu_valid
                 )
+                regu_z_loss = torch.mean(
+                    torch.mean((pulse_z[:, 1:] - pulse_z[:, :-1]).square(), dim=-1, keepdim=True) * regu_valid
+                )
+
+        # Keep existing mu temporal weight, and set z temporal weight to mu_weight * 0.1.
+        regu_loss = regu_mu_loss + 0.1 * regu_z_loss
 
         loss = action_loss + self.pulse_kl_weight * kl_loss + float(self.cfg.pulse_regu_coef) * regu_loss
 
@@ -1059,6 +1066,8 @@ class PPOPolicy(TensorDictModuleBase):
             "pulse/action_loss": action_loss.detach(),
             "pulse/kl_loss": kl_loss.detach(),
             "pulse/regu_loss": regu_loss.detach(),
+            "pulse/regu_mu_loss": regu_mu_loss.detach(),
+            "pulse/regu_z_loss": regu_z_loss.detach(),
             "pulse/kl_weight": torch.tensor(self.pulse_kl_weight, device=self.device),
             "pulse/post_std_mean": post_std.mean().detach(),
             "pulse/prior_std_mean": prior_std.mean().detach(),

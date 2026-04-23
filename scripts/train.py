@@ -110,10 +110,26 @@ def main(cfg: DictConfig):
 
         import inspect
         import shutil
-        source_path = inspect.getfile(policy.__class__)
-        target_path = os.path.join(run.dir, source_path.split("/")[-1])
-        shutil.copy(source_path, target_path)
-        run.save(target_path, policy="now")
+
+        source_paths = [inspect.getfile(policy.__class__)]
+        highlevel_cmd_path = os.path.join(
+            FILE_PATH,
+            "..",
+            "active_adaptation",
+            "envs",
+            "mdp",
+            "commands",
+            "highlevel_tennis.py",
+        )
+        source_paths.append(os.path.abspath(highlevel_cmd_path))
+
+        for source_path in source_paths:
+            if not os.path.isfile(source_path):
+                logging.warning(f"Skip wandb source upload, file not found: {source_path}")
+                continue
+            target_path = os.path.join(run.dir, os.path.basename(source_path))
+            shutil.copy(source_path, target_path)
+            run.save(target_path, policy="now")
 
         log_interval = (env.max_episode_length // cfg.algo.train_every) + 1
         logging.info(f"Log interval: {log_interval} steps")

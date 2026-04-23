@@ -9,8 +9,9 @@ PULSE_TEMP="${PULSE_TEMP:-1.0}"
 CFG_PATH="${CFG_PATH:-cfg/train.yaml}"
 
 
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/data/xueaoru/motion_tracking/outputs/pulse_more/checkpoint_38700.pt}"
-# CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-17/23-05-53-tracking-pulse-only-tennis-0417-2305/wandb/run-20260417_230629-nxafmogr/files/checkpoint_final.pt}"
+#CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/data/xueaoru/motion_tracking/outputs/pulse_more/checkpoint_38700.pt}"
+#CHECKPOINT_PATH="${CHECKPOINT_PATH:-}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/mnt/data/xueaoru/motion_tracking/outputs/pulse_more_smooth/checkpoint_final.pt}"
 
 USE_RACKET="${USE_RACKET:-1}"
 ROBOT_NAME="${ROBOT_NAME:-g1_col_full_self_racket}"
