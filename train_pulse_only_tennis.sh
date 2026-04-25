@@ -10,12 +10,18 @@ WANDB_PROJECT="${WANDB_PROJECT:-gentle_humanoid}"
 RUN_NAME="${RUN_NAME:-tracking-pulse-only-tennis-$(date +%m%d-%H%M)}"
 USE_RACKET="${USE_RACKET:-1}"
 ROBOT_NAME="${ROBOT_NAME:-}"
+MJ_NCONMAX="${MJ_NCONMAX:-128}"
+MJ_NJMAX="${MJ_NJMAX:-512}"
+MJ_ITER="${MJ_ITER:-10}"
+MJ_LS_ITER="${MJ_LS_ITER:-20}"
+MJ_CCD_ITER="${MJ_CCD_ITER:-12}"
+MJ_MULTICCD="${MJ_MULTICCD:-false}"
 
 USE_RACKET_NORM="$(printf '%s' "${USE_RACKET}" | tr '[:upper:]' '[:lower:]')"
 if [[ -z "${ROBOT_NAME}" ]]; then
   case "${USE_RACKET_NORM}" in
     1|true|yes|y|on)
-      ROBOT_NAME="g1_col_full_self_racket"
+      ROBOT_NAME="g1_col_full_self_racket_noself"
       ;;
     0|false|no|n|off|"")
       ROBOT_NAME="g1_col_full_self"
@@ -72,11 +78,20 @@ echo "[INFO] Stage-2 checkpoint source=${STAGE2_CKPT}"
 echo "[INFO] robot_name=${ROBOT_NAME} (USE_RACKET=${USE_RACKET})"
 echo "[INFO] hydra.run.dir=${HYDRA_RUN_DIR}"
 echo "[INFO] dataset=tennis only"
+echo "[INFO] mujoco(light): nconmax=${MJ_NCONMAX}, njmax=${MJ_NJMAX}, iter=${MJ_ITER}, ls_iter=${MJ_LS_ITER}, ccd_iter=${MJ_CCD_ITER}, multiccd=${MJ_MULTICCD}"
 
 uv run torchrun --nproc_per_node="${NPROC}" scripts/train.py \
   task=G1/G1_tracking +exp=pulse \
   "task.robot.name=${ROBOT_NAME}" \
   "checkpoint_path=${STAGE2_CKPT}" \
+  task.sim.isaac_physics_dt=0.005 \
+  task.sim.mujoco_physics_dt=0.005 \
+  "++task.sim.nconmax=${MJ_NCONMAX}" \
+  "++task.sim.njmax=${MJ_NJMAX}" \
+  "++task.sim.mujoco_iterations=${MJ_ITER}" \
+  "++task.sim.mujoco_ls_iterations=${MJ_LS_ITER}" \
+  "++task.sim.mujoco_ccd_iterations=${MJ_CCD_ITER}" \
+  "++task.sim.mujoco_multiccd=${MJ_MULTICCD}" \
   'task.command.dataset.mem_paths=[tennis]' \
   'task.command.dataset.path_weights=[1.0]' \
   "task.command.body_z_terminate_thres=0.35" \

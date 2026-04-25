@@ -21,4 +21,4 @@ algo:
   pulse_prior_hidden_dims: [1024, 512, 512]
   pulse_decoder_hidden_dims: [1024, 512, 512]
 
-total_frames: 1000_000_000
+total_frames: 5_000_000_000

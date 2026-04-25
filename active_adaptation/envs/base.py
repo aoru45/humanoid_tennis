@@ -590,14 +590,19 @@ class _Env(EnvBase):
     def setup_viewer(self) -> None:
         self._viewer_enabled = False
         self.viewer = None
+        self._viewer_max_fps = 0.0
+        self._viewer_min_period_s = 0.0
+        self._viewer_last_update_s = 0.0
 
         headless = True
         debug_visualization_enabled = False
         camera_tracking_enabled = False
+        viewer_max_fps = 30.0
         if hasattr(self.cfg, "viewer"):
             headless = self.cfg.viewer.get("headless", True)
             debug_visualization_enabled = self.cfg.viewer.get("debug_visualization_enabled", False)
             camera_tracking_enabled = self.cfg.viewer.get("camera_tracking_enabled", False)
+            viewer_max_fps = self.cfg.viewer.get("max_fps", 30.0)
         if headless:
             print("[INFO] Headless mode: not launching viewer.")
             return
@@ -619,12 +624,16 @@ class _Env(EnvBase):
             self._viser_scene.create_visualization_gui()
             self._viser_scene.debug_visualization_enabled = bool(debug_visualization_enabled)
             self._viser_scene.camera_tracking_enabled = bool(camera_tracking_enabled)
+            self._viewer_max_fps = max(0.0, float(viewer_max_fps))
+            self._viewer_min_period_s = (1.0 / self._viewer_max_fps) if self._viewer_max_fps > 0.0 else 0.0
+            self._viewer_last_update_s = 0.0
             self._viewer_enabled = True
             self.debug_draw = _ViserDebugDraw(self._viser_scene)
             print(
                 "[INFO] Viser viewer launched. "
                 f"debug_visualization_enabled={bool(debug_visualization_enabled)}, "
-                f"camera_tracking_enabled={bool(camera_tracking_enabled)}"
+                f"camera_tracking_enabled={bool(camera_tracking_enabled)}, "
+                f"max_fps={self._viewer_max_fps:.1f}"
             )
         except Exception as exc:
             print(f"[WARN] Failed to launch Viser viewer: {exc}")
@@ -634,6 +643,10 @@ class _Env(EnvBase):
             return
         if not hasattr(self.sim, "data"):
             return
+        now = time.perf_counter()
+        if (not force_sync) and (self._viewer_min_period_s > 0.0):
+            if (now - self._viewer_last_update_s) < self._viewer_min_period_s:
+                return
         wp_data = self.sim.data
         try:
             device = getattr(wp_data.xpos, "device", None)
@@ -664,6 +677,7 @@ class _Env(EnvBase):
                     pass
             else:
                 raise
+        self._viewer_last_update_s = now
 
     def _has_gui(self) -> bool:
         return self._viewer_enabled and self.viewer is not None
@@ -679,7 +693,8 @@ class _Env(EnvBase):
     def get_extra_state(self) -> dict:
         return dict(self.extra)
 
-    def close(self):
+    def close(self, raise_if_closed: bool = True):
+        del raise_if_closed
         if not self.is_closed:
             if self.viewer is not None:
                 try:

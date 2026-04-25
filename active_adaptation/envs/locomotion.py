@@ -145,13 +145,31 @@ class SimpleEnv(_Env):
 
         scene_cfg.sensors = tuple(sensors)
 
+        nconmax = int(self.cfg.sim.get("nconmax", 600))
+        njmax = int(self.cfg.sim.get("njmax", 2000))
+        mujoco_iterations = int(self.cfg.sim.get("mujoco_iterations", 20))
+        mujoco_ls_iterations = int(self.cfg.sim.get("mujoco_ls_iterations", 40))
+        mujoco_ccd_iterations = int(self.cfg.sim.get("mujoco_ccd_iterations", 50))
+        mujoco_multiccd = bool(self.cfg.sim.get("mujoco_multiccd", False))
+        # Guard against OOM in large-batch training (e.g., 2k~4k envs/GPU):
+        # collision buffers in mujoco_warp can scale aggressively with nconmax
+        # and multiccd, causing huge device allocations.
+        if int(self.cfg.num_envs) >= 8192:
+            nconmax = min(nconmax, 300)
+            njmax = min(njmax, 1200)
+            mujoco_ccd_iterations = min(mujoco_ccd_iterations, 50)
+            if mujoco_multiccd:
+                print("[WARN] task.num_envs is large; forcing mujoco_multiccd=false to avoid GPU OOM.")
+            mujoco_multiccd = False
         self.sim_cfg = sim_cfg = SimulationCfg(
-            nconmax=200,
-            njmax=500,
+            nconmax=nconmax,
+            njmax=njmax,
             mujoco=MujocoCfg(
                 timestep=mjlab_dt,
-                iterations=10,
-                ls_iterations=20,
+                iterations=mujoco_iterations,
+                ls_iterations=mujoco_ls_iterations,
+                ccd_iterations=mujoco_ccd_iterations,
+                multiccd=mujoco_multiccd,
             ),
         )
 

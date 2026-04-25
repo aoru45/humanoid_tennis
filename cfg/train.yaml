@@ -17,6 +17,10 @@ eval_render: false
 save_interval: 150
 seed: 0
 checkpoint_path: null
+resume_wandb: true
+resume_load_env: true
+resume_load_rng: true
+resume_load_train_state: true
 vecnorm: ${oc.select:algo.vecnorm,train}
 
 camera_follow: false

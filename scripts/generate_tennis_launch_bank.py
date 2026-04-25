@@ -96,6 +96,30 @@ def main():
     parser.add_argument("--target-x-range", type=float, nargs=2, default=None)
     parser.add_argument("--target-y-range", type=float, nargs=2, default=None)
     parser.add_argument(
+        "--impact-vh-min",
+        type=float,
+        default=10.0,
+        help="Minimum horizontal speed magnitude at first bounce (m/s).",
+    )
+    parser.add_argument(
+        "--impact-vh-max",
+        type=float,
+        default=16.5,
+        help="Maximum horizontal speed magnitude at first bounce (m/s).",
+    )
+    parser.add_argument(
+        "--impact-vz-abs-min",
+        type=float,
+        default=5.5,
+        help="Minimum absolute vertical speed at first bounce (m/s).",
+    )
+    parser.add_argument(
+        "--impact-vz-abs-max",
+        type=float,
+        default=9.5,
+        help="Maximum absolute vertical speed at first bounce (m/s).",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default="data/tennis_launch_bank/highlevel_launch_bank.npz",
@@ -120,6 +144,10 @@ def main():
     total = int(args.num_samples)
     batch_size = max(1, int(args.batch_size))
     produced = 0
+    attempted = 0
+
+    cmd_cfg = cfg.task.command
+    
 
     pos_local_list: List[torch.Tensor] = []
     vel_list: List[torch.Tensor] = []
@@ -136,25 +164,41 @@ def main():
             with torch.no_grad():
                 pos_w, vel, ang, tgt_w = cmd._sample_ball_launch(env_ids)
             origins = env.base_env.scene.env_origins[env_ids]
+            pos_local = (pos_w - origins).detach().cpu()
+            vel_cpu = vel.detach().cpu()
+            ang_cpu = ang.detach().cpu()
+            tgt_local = (tgt_w - origins).detach().cpu()
 
-            pos_local_list.append((pos_w - origins).detach().cpu())
-            vel_list.append(vel.detach().cpu())
-            ang_list.append(ang.detach().cpu())
-            tgt_local_list.append((tgt_w - origins).detach().cpu())
+            keep_mask = torch.ones((n,), dtype=torch.bool)
 
-            produced += n
+            kept = int(keep_mask.sum().item())
+            attempted += n
+            if kept > 0:
+                pos_local_list.append(pos_local[keep_mask])
+                vel_list.append(vel_cpu[keep_mask])
+                ang_list.append(ang_cpu[keep_mask])
+                tgt_local_list.append(tgt_local[keep_mask])
+                produced += kept
+
+            if attempted > max(total * 80, 20000):
+                raise RuntimeError(
+                    "Launch bank rebound filtering is too strict. "
+                    f"attempted={attempted}, produced={produced}, target={total}. "
+                    "Relax --rebound-height-min/max or disable --rebound-filter."
+                )
             if args.print_every > 0 and (produced % int(args.print_every) == 0 or produced == total):
-                print(f"[INFO] sampled {produced}/{total}")
+                accept_rate = float(produced) / float(max(attempted, 1))
+                print(f"[INFO] sampled {produced}/{total} (attempted={attempted}, accept_rate={accept_rate:.3f})")
     finally:
         try:
             env.close()
         except TypeError:
             env.base_env.close()
 
-    pos_local = torch.cat(pos_local_list, dim=0).numpy().astype(np.float32, copy=False)
-    vel = torch.cat(vel_list, dim=0).numpy().astype(np.float32, copy=False)
-    ang = torch.cat(ang_list, dim=0).numpy().astype(np.float32, copy=False)
-    tgt_local = torch.cat(tgt_local_list, dim=0).numpy().astype(np.float32, copy=False)
+    pos_local = torch.cat(pos_local_list, dim=0)[:total].numpy().astype(np.float32, copy=False)
+    vel = torch.cat(vel_list, dim=0)[:total].numpy().astype(np.float32, copy=False)
+    ang = torch.cat(ang_list, dim=0)[:total].numpy().astype(np.float32, copy=False)
+    tgt_local = torch.cat(tgt_local_list, dim=0)[:total].numpy().astype(np.float32, copy=False)
 
     np.savez_compressed(
         output_path,
@@ -162,6 +206,17 @@ def main():
         launch_vel=vel,
         launch_ang=ang,
         target_bounce_local=tgt_local,
+        air_drag_k=np.array(cmd.air_drag_k, dtype=np.float32),
+        drag_coef=np.array(cmd.drag_coef, dtype=np.float32),
+        lift_spin_scale=np.array(cmd.lift_spin_scale, dtype=np.float32),
+        spin_damping_coef=np.array(cmd.spin_damping_coef, dtype=np.float32),
+        air_density=np.array(cmd.air_density, dtype=np.float32),
+        ball_mass=np.array(cmd.ball_mass, dtype=np.float32),
+        ball_radius=np.array(cmd.ball_radius, dtype=np.float32),
+        bounce_restitution=np.array(cmd.bounce_restitution, dtype=np.float32),
+        bounce_friction=np.array(cmd.bounce_friction, dtype=np.float32),
+        bounce_spin_friction=np.array(cmd.bounce_spin_friction, dtype=np.float32),
+        bounce_spin_decay=np.array(cmd.bounce_spin_decay, dtype=np.float32),
     )
     print(f"[INFO] Saved launch bank: {output_path}")
     print(f"[INFO] Shapes: pos={pos_local.shape}, vel={vel.shape}, ang={ang.shape}, target={tgt_local.shape}")

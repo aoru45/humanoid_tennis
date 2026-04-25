@@ -218,12 +218,14 @@ def init_wandb_run(wandb_cfg: Any, config: Any = None, **kwargs):
                 kwargs[key] = value
     kwargs = build_wandb_init_kwargs(wandb_cfg, **kwargs)
     requested_name = kwargs.get("name", None)
+    resume_mode = str(kwargs.get("resume", "")).lower()
+    allow_config_val_change = resume_mode in ("allow", "must", "auto")
     run = wandb.init(**kwargs)
     if requested_name is not None and str(requested_name).strip():
         run.name = str(requested_name)
     config_dict = _to_container(config)
     if config_dict is not None:
-        run.config.update(config_dict)
+        run.config.update(config_dict, allow_val_change=allow_config_val_change)
     return run
 
 

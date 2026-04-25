@@ -649,6 +649,15 @@ class PPOPolicy(TensorDictModuleBase):
         self.broadcast_parameters(extra_modules=[vecnorm])
         return info
 
+    def _info_to_tensordict(self, info: dict) -> TensorDict:
+        normalized = {}
+        for k, v in info.items():
+            if isinstance(v, torch.Tensor):
+                normalized[k] = v.to(self.device)
+            else:
+                normalized[k] = torch.tensor(float(v), device=self.device)
+        return TensorDict(normalized, [])
+
     def _ppo_update(self, td, update_func: callable = None):
         infos = []
         reward_clamp_min = getattr(self.cfg, "adv_reward_clamp_min", 0.0)
@@ -659,7 +668,7 @@ class PPOPolicy(TensorDictModuleBase):
 
         for _ in range(self.cfg.ppo_epochs):
             for mb in make_batch(td, self.num_minibatches):
-                infos.append(TensorDict(update_func(mb), []))
+                infos.append(self._info_to_tensordict(update_func(mb)))
         info = {k: v.mean().item() for k, v in torch.stack(infos).items()}
 
         with torch.no_grad():
@@ -726,23 +735,35 @@ class PPOPolicy(TensorDictModuleBase):
                     return False
             return True
 
-        def _skip_update_info() -> dict[str, torch.Tensor]:
-            z = torch.tensor(0.0, device=self.device)
-            return {
-                "actor/policy_loss": z,
-                "actor/entropy": z,
-                "adapt/reg_loss": z,
-                "actor/actor_grad_norm": z,
-                "action/encoder_grad_norm": z,
-                "actor/clamp_ratio": z,
-                "critic/critic_grad_norm": z,
-                "actor/kl": z,
-                "actor/symmetry_loss_loc": z,
-                "actor/symmetry_loss_std": z,
-                "critic/explained_var": z,
-                "critic/value_loss": z,
-                "train/nonfinite_skip": torch.tensor(1.0, device=self.device),
-            }
+        def _global_any_bad(local_bad: bool) -> bool:
+            """Synchronize bad-state decisions across ranks.
+
+            In distributed mode, if any rank decides this minibatch is invalid,
+            all ranks must take the same skip path to keep collective calls aligned.
+            """
+            if not aa.is_distributed():
+                return bool(local_bad)
+            flag = torch.tensor(
+                1 if local_bad else 0,
+                device=self.device,
+                dtype=torch.int32,
+            )
+            dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+            return bool(flag.item() > 0)
+
+        def _raise_nonfinite(reason: str, **details) -> None:
+            msg = f"Non-finite detected in PPO update: reason={reason}"
+            if details:
+                detail_str = ", ".join(f"{k}={v}" for k, v in details.items())
+                msg = f"{msg}, {detail_str}"
+            raise FloatingPointError(msg)
+
+        def _as_row_mask(mask: torch.Tensor) -> torch.Tensor:
+            if mask.dtype != torch.bool:
+                mask = mask > 0.5
+            if mask.ndim <= 1:
+                return mask
+            return mask.reshape(mask.shape[0], -1).all(dim=-1)
 
         bsize = mb.shape[0]
         loc_old, scale_old = mb["loc"].clone(), mb["scale"].clone()
@@ -763,7 +784,6 @@ class PPOPolicy(TensorDictModuleBase):
             action_old = mb["action"].clone()
             logp_old = mb["action_log_prob"].clone()
             exclude_keys = ["action_log_prob", "action"]
-
         if self.use_symmetry_ppo:
             mb_sym = mb.clone()
             mb_sym[OBS_KEY] = self.obs_transform(mb_sym[OBS_KEY])
@@ -779,19 +799,27 @@ class PPOPolicy(TensorDictModuleBase):
         else:
             mb = mb.exclude("next")
         valid = ~mb["is_init"]
+        valid_f = valid.float()
+        valid_mask = _as_row_mask(valid)
+        valid_actor_mask = valid_mask[:bsize]
         keys_all = mb.keys(True, True)
         exclude_keys = [k for k in exclude_keys if k in keys_all]
         mb = mb.exclude(*exclude_keys)
 
-        if not _all_finite(
+        no_valid_actor = bool(valid_actor_mask.sum().item() <= 0)
+        if _global_any_bad(no_valid_actor):
+            _raise_nonfinite("bad_input", no_valid_actor=True, bsize=int(bsize))
+
+        bad_input = not _all_finite(
             loc_old,
             scale_old,
             action_old,
             logp_old,
             mb.get("adv", None),
             mb.get("ret", None),
-        ):
-            return _skip_update_info()
+        )
+        if _global_any_bad(bad_input):
+            _raise_nonfinite("bad_input", bad_input=True, bsize=int(bsize))
 
         if encoder is not None:
             if update_encoder:
@@ -808,35 +836,46 @@ class PPOPolicy(TensorDictModuleBase):
 
         loc = mb["loc"][:bsize]
         scale = mb["scale"][:bsize]
-        if not _all_finite(loc, scale):
-            return _skip_update_info()
+        bad_actor_out = not _all_finite(loc, scale)
+        if _global_any_bad(bad_actor_out):
+            _raise_nonfinite("bad_actor_out", bad_actor_out=True)
 
-        dist = IndependentNormal(loc, scale)
-        logp = dist.log_prob(action_old)
-        entropy = dist.entropy().mean()
-        if not _all_finite(logp, entropy):
-            return _skip_update_info()
+        action_dist = IndependentNormal(loc, scale)
+        logp = action_dist.log_prob(action_old)
+        entropy_all = action_dist.entropy()
+        entropy = entropy_all[valid_actor_mask].mean()
+        bad_dist = not _all_finite(logp, entropy_all)
+        if _global_any_bad(bad_dist):
+            _raise_nonfinite("bad_dist", bad_dist=True)
 
         ratio = torch.exp(logp - logp_old).unsqueeze(-1)
-        if not _all_finite(ratio):
-            return _skip_update_info()
+        bad_ratio = not _all_finite(ratio)
+        if _global_any_bad(bad_ratio):
+            _raise_nonfinite("bad_ratio", bad_ratio=True)
         surr1 = mb["adv"][:bsize] * ratio
         surr2 = mb["adv"][:bsize] * ratio.clamp(1 - self.clip_param, 1 + self.clip_param)
-        policy_loss = - torch.mean(torch.min(surr1, surr2) * valid[:bsize])
+        surr_min = torch.min(surr1, surr2).reshape(bsize, -1).mean(dim=-1)
+        policy_loss = -surr_min[valid_actor_mask].mean()
         entropy_loss = - self.entropy_coef * entropy
 
         values = critic(mb)["state_value"]
-        value_loss = F.mse_loss(mb["ret"], values, reduction="none")
-        value_loss = (value_loss * valid).mean(dim=0)
-        if not _all_finite(policy_loss, entropy_loss, value_loss):
-            return _skip_update_info()
+        value_valid = valid & torch.isfinite(mb["ret"]) & torch.isfinite(values)
+        value_valid_mask = _as_row_mask(value_valid)
+        no_valid_value = bool(value_valid_mask.sum().item() <= 0)
+        if _global_any_bad(no_valid_value):
+            _raise_nonfinite("bad_loss", no_valid_value=True)
+        value_err = torch.square(mb["ret"] - values).reshape(values.shape[0], -1).mean(dim=-1)
+        value_loss = value_err[value_valid_mask].mean()
+        bad_loss = not _all_finite(policy_loss, entropy_loss, value_loss)
+        if _global_any_bad(bad_loss):
+            _raise_nonfinite("bad_loss", bad_loss=True)
 
         if self.cfg.phase == "train":
             if "priv_pred" not in mb.keys():
                 with torch.no_grad():
                     self.adapt_module(mb)
             reg_loss = F.mse_loss(mb["priv_pred"], mb["priv_feature"], reduction="none")
-            reg_loss = self.reg_lambda * torch.mean(reg_loss * valid)
+            reg_loss = self.reg_lambda * torch.mean(reg_loss * valid_f)
         else:
             reg_loss = 0.0
         
@@ -853,13 +892,14 @@ class PPOPolicy(TensorDictModuleBase):
         loss = (
             policy_loss
             + entropy_loss
-            + value_loss.mean()
+            + value_loss
             + reg_loss
             + symmetry_loss_loc
             + symmetry_loss_std
         )
-        if not _all_finite(loss):
-            return _skip_update_info()
+        bad_total_loss = not _all_finite(loss)
+        if _global_any_bad(bad_total_loss):
+            _raise_nonfinite("bad_total_loss", bad_total_loss=True)
 
         # do optimisation step
         opt_actor.zero_grad()
@@ -882,10 +922,11 @@ class PPOPolicy(TensorDictModuleBase):
         critic_grad_norm = nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
         critic_step_ok = _all_finite(critic_grad_norm) and _module_grads_finite(critic)
 
-        if not (actor_step_ok and critic_step_ok):
+        local_bad_grad = not (actor_step_ok and critic_step_ok)
+        if _global_any_bad(local_bad_grad):
             opt_actor.zero_grad(set_to_none=True)
             opt_critic.zero_grad(set_to_none=True)
-            return _skip_update_info()
+            _raise_nonfinite("bad_grad", local_bad_grad=True)
 
         if update_actor:
             opt_actor.step()
@@ -893,23 +934,29 @@ class PPOPolicy(TensorDictModuleBase):
         opt_critic.step()
 
         with torch.no_grad():
-            explained_var = 1 - value_loss / (mb["ret"] * valid).var(dim=0).clamp_min(1.0e-6)
-            clipfrac = ((ratio - 1.0).abs() > self.clip_param).float().mean()
+            ret_row = mb["ret"].reshape(mb["ret"].shape[0], -1).mean(dim=-1)
+            val_row = values.reshape(values.shape[0], -1).mean(dim=-1)
+            ret_sel = ret_row[value_valid_mask]
+            val_sel = val_row[value_valid_mask]
+            explained_var = 1.0 - torch.square(ret_sel - val_sel).mean() / ret_sel.var(unbiased=False).clamp_min(1.0e-6)
+            clip_hits = ((ratio - 1.0).abs() > self.clip_param).reshape(bsize, -1).any(dim=-1).float()
+            clipfrac = clip_hits[valid_actor_mask].mean()
             loc, scale = mb["loc"][:bsize], mb["scale"][:bsize]
             scale_safe = scale.clamp_min(1.0e-6)
             scale_old_safe = scale_old.clamp_min(1.0e-6)
-            kl = torch.sum(
+            kl_all = torch.sum(
                 torch.log(scale_safe) - torch.log(scale_old_safe)
                 + (torch.square(scale_old_safe) + torch.square(loc_old - loc))
                 / (2.0 * torch.square(scale_safe))
                 - 0.5,
                 axis=-1,
-            ).mean()
+            )
+            kl = kl_all[valid_actor_mask].mean()
 
         info = {
             "actor/policy_loss": policy_loss.detach(),
             "actor/entropy": entropy.detach(),
-            "adapt/reg_loss": reg_loss if isinstance(reg_loss, torch.Tensor) else torch.tensor(0.0),
+            "adapt/reg_loss": reg_loss if isinstance(reg_loss, torch.Tensor) else torch.tensor(0.0, device=self.device),
             "actor/actor_grad_norm": actor_grad_norm,
             "action/encoder_grad_norm": encoder_grad_norm,
             "actor/clamp_ratio": clipfrac,
@@ -917,11 +964,10 @@ class PPOPolicy(TensorDictModuleBase):
             "actor/kl": kl.detach(),
             "actor/symmetry_loss_loc": symmetry_loss_loc.detach(),
             "actor/symmetry_loss_std": symmetry_loss_std.detach(),
-            "train/nonfinite_skip": torch.tensor(0.0, device=self.device),
         }
 
         info["critic/explained_var"] = explained_var.mean().detach()
-        info["critic/value_loss"] = value_loss.mean().detach()
+        info["critic/value_loss"] = value_loss.detach()
     
         return info
 
@@ -938,13 +984,9 @@ class PPOPolicy(TensorDictModuleBase):
         if isinstance(max_scale, torch.Tensor):
             if max_scale.numel() > 1 and max_scale.numel() != actor_std.numel():
                 max_scale = torch.full_like(actor_std.data, float(max_scale.mean().item()))
-        reset_scale = float(max_scale.mean().item()) if isinstance(max_scale, torch.Tensor) else float(max_scale)
-        actor_std.data = torch.nan_to_num(
-            actor_std.data,
-            nan=reset_scale,
-            posinf=reset_scale,
-            neginf=1.0e-4,
-        )
+        if not torch.isfinite(actor_std.data).all():
+            bad = (~torch.isfinite(actor_std.data)).sum().item()
+            raise FloatingPointError(f"actor_std contains non-finite values: count={int(bad)}")
         actor_std.data.clamp_(min=1.0e-4)
         actor_std.data = torch.minimum(actor_std.data, max_scale)
 
@@ -953,7 +995,7 @@ class PPOPolicy(TensorDictModuleBase):
         
         for _ in range(2):
             for mb in make_batch(td, self.num_minibatches, self.cfg.train_every):
-                infos.append(TensorDict(self.update2(mb), []))
+                infos.append(self._info_to_tensordict(self.update2(mb)))
 
         return {k: v.mean().item() for k, v in torch.stack(infos).items()}
 
@@ -962,7 +1004,7 @@ class PPOPolicy(TensorDictModuleBase):
 
         for _ in range(self.cfg.pulse_epochs):
             for mb in make_batch(td, self.num_minibatches, self.cfg.train_every):
-                infos.append(TensorDict(self._update_pulse(mb), []))
+                infos.append(self._info_to_tensordict(self._update_pulse(mb)))
 
         return {k: v.mean().item() for k, v in torch.stack(infos).items()}
 

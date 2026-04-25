@@ -17,7 +17,8 @@ G1_RACKET_XML = Path(ASSET_PATH) / "G1" / "g1_racket.xml"
 G1_RACKET_MESH = Path(ASSET_PATH) / "G1_racket" / "unitree_g1" / "assets" / "tennis" / "entire_visual.STL"
 RACKET_MASS = 0.345643
 RACKET_COLLISION_CONTYPE = 2
-RACKET_COLLISION_CONAFFINITY = 1 
+RACKET_COLLISION_CONAFFINITY = 1
+RACKET_COLLISION_CONAFFINITY_NO_SELF = 0
 
 
 def _get_assets(meshdir: str) -> dict[str, bytes]:
@@ -200,6 +201,14 @@ G1_RACKET_BALL_COLLISION = CollisionCfg(
     disable_other_geoms=False,
 )
 
+# Keep racket-ball collision, but prevent racket from colliding with robot geoms.
+G1_RACKET_BALL_ONLY_COLLISION = CollisionCfg(
+    geom_names_expr=("tennis_racket_collision",),
+    contype=RACKET_COLLISION_CONTYPE,
+    conaffinity=RACKET_COLLISION_CONAFFINITY_NO_SELF,
+    disable_other_geoms=False,
+)
+
 G1_ARTICULATION = EntityArticulationInfoCfg(
     actuators=(
         G1_ACTUATOR_UPPER,
@@ -236,6 +245,18 @@ G1_RACKET_CFG.joint_symmetry_mapping = JOINT_SYMMETRY_MAP
 G1_RACKET_CFG.spatial_symmetry_mapping = SPATIAL_SYMMETRY_MAP_RACKET
 G1_RACKET_CFG.joint_name_order = G1_JOINT_ORDER
 
+G1_RACKET_NO_SELF_CFG = EntityCfg(
+    init_state=G1_INIT_STATE,
+    collisions=(FULL_COLLISION, G1_RACKET_BALL_ONLY_COLLISION),
+    spec_fn=_get_racket_spec,
+    articulation=G1_ARTICULATION,
+)
+
+G1_RACKET_NO_SELF_CFG.joint_symmetry_mapping = JOINT_SYMMETRY_MAP
+G1_RACKET_NO_SELF_CFG.spatial_symmetry_mapping = SPATIAL_SYMMETRY_MAP_RACKET
+G1_RACKET_NO_SELF_CFG.joint_name_order = G1_JOINT_ORDER
+
 G1_COL_FULL = G1_CFG
 G1_COL_FULL_SELF = G1_CFG
 G1_COL_FULL_SELF_RACKET = G1_RACKET_CFG
+G1_COL_FULL_SELF_RACKET_NOSELF = G1_RACKET_NO_SELF_CFG

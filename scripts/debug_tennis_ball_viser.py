@@ -16,6 +16,19 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from scripts.utils.helpers import make_env_policy
 
 
+def resolve_launch_bank_subset_path(args) -> tuple[str, str]:
+    subset = str(args.mode).strip().lower()
+    if subset == "mid":
+        subset = "medium"
+    if subset not in {"easy", "medium", "hard"}:
+        raise ValueError(f"Unsupported mode: {args.mode}")
+    bank_path = os.path.join(
+        str(args.launch_bank_root),
+        f"launch_bank_{subset}.npz",
+    )
+    return subset, bank_path
+
+
 def build_cfg(args):
     cfg_dir = os.path.join(os.path.dirname(__file__), "..", "cfg")
     cfg_dir = os.path.abspath(cfg_dir)
@@ -46,12 +59,18 @@ def build_cfg(args):
         cfg.checkpoint_path = ckpt_arg
     else:
         cfg.checkpoint_path = None
-    if args.launch_bank_file:
-        cfg.task.command.launch_bank_file = str(args.launch_bank_file)
+    subset, bank_path = resolve_launch_bank_subset_path(args)
+    cfg.task.command.launch_bank_file = bank_path
+    # Debug script uses a single subset bank; disable mixed multi-bank loading.
+    cfg.task.command.launch_bank_easy_file = ""
+    cfg.task.command.launch_bank_medium_file = ""
+    cfg.task.command.launch_bank_hard_file = ""
     if args.disable_randomization and "randomization" in cfg.task:
         cfg.task.randomization = {}
     if args.disable_fall_over_termination and "termination" in cfg.task and "fall_over" in cfg.task.termination:
         del cfg.task.termination["fall_over"]
+    args._resolved_launch_bank_subset = subset
+    args._resolved_launch_bank_path = bank_path
     return cfg
 
 
@@ -175,6 +194,9 @@ def run(args):
         int(args.launch_cache_warm_start),
     )
     sleep_dt = float(args.realtime_scale) * float(env.base_env.step_dt)
+    min_loop_dt = 0.0
+    if float(args.viewer_max_fps) > 0.0:
+        min_loop_dt = 1.0 / float(args.viewer_max_fps)
 
     print(f"[INFO] task={args.task}, exp={args.exp}, num_envs={env.num_envs}, device={env.device}")
     if str(env.device) != str(args.device):
@@ -189,8 +211,15 @@ def run(args):
         f"disable_fall_over_termination={bool(args.disable_fall_over_termination)}"
     )
     print("[INFO] Viser launched by env viewer. Press Ctrl+C to stop.")
-    if args.launch_bank_file:
-        print(f"[INFO] Launch bank file: {args.launch_bank_file}")
+    print(
+        "[INFO] viewer throttle:",
+        f"max_fps={float(args.viewer_max_fps):.1f}",
+        f"min_loop_dt={min_loop_dt:.4f}s",
+    )
+    print(
+        f"[INFO] Launch bank subset: {args._resolved_launch_bank_subset}, "
+        f"path={args._resolved_launch_bank_path}"
+    )
     if cache_enabled:
         print(
             "[INFO] Launch cache enabled: "
@@ -205,6 +234,7 @@ def run(args):
     
     try:
         while True:
+            loop_t0 = time.perf_counter()
             if args.steps > 0 and step >= args.steps:
                 break
 
@@ -255,8 +285,11 @@ def run(args):
                 carry = env.reset()
                 next_forced_reset += args.reset_every
 
-            if sleep_dt > 0:
-                time.sleep(sleep_dt)
+            target_loop_dt = max(float(sleep_dt), float(min_loop_dt))
+            if target_loop_dt > 0:
+                delay = target_loop_dt - (time.perf_counter() - loop_t0)
+                if delay > 0:
+                    time.sleep(delay)
             step += 1
 
     except KeyboardInterrupt:
@@ -284,7 +317,19 @@ def main():
     parser.add_argument("--env-id", type=int, default=0)
     parser.add_argument("--max-episode-length", type=int, default=0, help="Override task.max_episode_length if >0.")
     parser.add_argument("--command-max-task-steps", type=int, default=0, help="Override task.command.max_task_steps if >0.")
-    parser.add_argument("--launch-bank-file", type=str, default="data/tennis_launch_bank/highlevel_launch_bank.npz", help="Load pre-generated launch bank (.npz) for instant resets.")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="easy",
+        choices=["easy", "mid", "hard"],
+        help="Select launch bank subset. 'mid' maps to 'medium'.",
+    )
+    parser.add_argument(
+        "--launch-bank-root",
+        type=str,
+        default="data/tennis_launch_bank/highlevel_subsets",
+        help="Directory containing launch_bank_easy/medium/hard.npz.",
+    )
     parser.add_argument("--launch-cache-size", type=int, default=0, help="Pre-generate launch states in batches for faster resets.")
     parser.add_argument("--launch-cache-refill-size", type=int, default=32, help="Per-refill sample batch size for launch cache.")
     parser.add_argument("--launch-cache-warm-start", type=int, default=8, help="Initial cache batch size on first reset.")
@@ -292,6 +337,12 @@ def main():
     parser.add_argument("--disable-randomization", action="store_true", help="Disable task randomization for simplified debugging.")
     parser.add_argument("--disable-fall-over-termination", action="store_true", help="Disable fall_over termination for simplified debugging.")
     parser.add_argument("--realtime-scale", type=float, default=0., help="sleep = step_dt * scale; set 0 for fastest.")
+    parser.add_argument(
+        "--viewer-max-fps",
+        type=float,
+        default=45.0,
+        help="Throttle loop to at most this FPS to keep Viser responsive. <=0 disables throttling.",
+    )
     parser.add_argument("--viewer-debug", action="store_true", help="Enable Viser debug overlays.")
     parser.add_argument("--command-debug-draw", action="store_true", help="Enable command debug draw points.")
     args = parser.parse_args()

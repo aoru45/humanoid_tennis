@@ -456,9 +456,16 @@ class body_height(Observation):
         self.body_ids, self.body_names = self.asset.find_bodies(body_names)
     
     def compute(self) -> torch.Tensor:
-        return self.asset.data.body_link_pos_w[:, self.body_ids, 2].reshape(
+        heights = self.asset.data.body_link_pos_w[:, self.body_ids, 2].reshape(
             self.num_envs, -1
         )
+        if not torch.isfinite(heights).all():
+            bad_env = (~torch.isfinite(heights)).any(dim=-1).nonzero(as_tuple=False).squeeze(-1)
+            raise FloatingPointError(
+                f"Non-finite body_height observation: num_envs={int(bad_env.numel())}, "
+                f"sample_env_ids={bad_env[:16].detach().cpu().tolist()}"
+            )
+        return heights
 
     def symmetry_transforms(self):
         return sym_utils.cartesian_space_symmetry(self.asset, self.body_names, sign=(1,))

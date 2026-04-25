@@ -11,14 +11,16 @@ BALL_MASS = 0.057
 COURT_HALF_WIDTH = 4.11
 COURT_HALF_LENGTH = 11.89
 NET_HEIGHT = 1.07
-BALL_COLLISION_CONTYPE = 1
-# Collide with racket(2), net(4), and dedicated court bounce surface(8).
+# Ball uses receive-only mask: other geoms' contype must match this conaffinity.
+# This avoids unintended collision with default terrain(contype=1), while still
+# allowing racket(2), net(4), and dedicated court bounce surface(8).
+BALL_COLLISION_CONTYPE = 0
 BALL_COLLISION_CONAFFINITY = 14
 NET_COLLISION_CONTYPE = 4
-NET_COLLISION_CONAFFINITY = 1  # only collide with ball
+NET_COLLISION_CONAFFINITY = 0  # ball-only: avoid robot/net contacts
 # Dedicated court bounce collider that only interacts with the ball.
 COURT_BALL_COLLISION_CONTYPE = 8
-COURT_BALL_COLLISION_CONAFFINITY = 1
+COURT_BALL_COLLISION_CONAFFINITY = 0  # ball-only: avoid robot/court contacts
 # Optional court-surface collider that only interacts with racket(contype=2).
 COURT_RACKET_COLLISION_CONTYPE = 1
 COURT_RACKET_COLLISION_CONAFFINITY = 2
@@ -80,6 +82,12 @@ def _build_tennis_court_spec(
     net_collision = _find_named(spec.geoms, "tennis_net_collision")
     net_collision.pos[:] = [0.0, 0.0, net_hh]
     net_collision.size[:] = [COURT_HALF_WIDTH, float(net_collision_half_thickness), net_hh]
+    net_collision.contype = NET_COLLISION_CONTYPE
+    net_collision.conaffinity = NET_COLLISION_CONAFFINITY
+
+    court_ball_collision = _find_named(spec.geoms, "tennis_court_ball_collision")
+    court_ball_collision.contype = COURT_BALL_COLLISION_CONTYPE
+    court_ball_collision.conaffinity = COURT_BALL_COLLISION_CONAFFINITY
 
     court_racket_collision = _find_named(spec.geoms, "tennis_court_racket_collision")
     if enable_racket_court_collision:

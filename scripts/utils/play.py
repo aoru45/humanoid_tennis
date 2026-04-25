@@ -5,6 +5,8 @@ import einops
 import itertools
 import os
 import datetime
+import time
+from pathlib import Path
 from omegaconf import OmegaConf
 
 
@@ -27,7 +29,6 @@ def play(cfg):
         env.step_schedule(1.0, 0)
 
     if cfg.export_policy:
-        import time
         import copy
         time_str = datetime.datetime.now().strftime("%m-%d_%H-%M")
         fake_input = env.observation_spec[0].rand().cpu()
@@ -67,7 +68,16 @@ def play(cfg):
     ]
     episode_stats = EpisodeStats(stats_keys, device=env.device)
     rollout_mode = cfg.get("rollout_mode", "eval")
+    rollout_max_steps = int(cfg.get("rollout_max_steps", -1))
+    rollout_record_path = str(cfg.get("rollout_record_path", "")).strip()
+    rollout_record_env_id = int(cfg.get("rollout_record_env_id", 0))
+    rollout_target_fps = float(cfg.get("rollout_target_fps", 0.0))
+    rollout_period_s = (1.0 / rollout_target_fps) if rollout_target_fps > 0.0 else 0.0
+    next_tick_s = None
     policy = policy.get_rollout_policy(rollout_mode)
+    record_qpos = []
+    record_qvel = []
+    record_enabled = len(rollout_record_path) > 0
 
     td_ = env.reset()
     
@@ -81,5 +91,72 @@ def play(cfg):
                 print("Step", i)
                 for k, v in sorted(episode_stats.pop().items(True, True)):
                     print(k, torch.mean(v).item())
+
+            if rollout_period_s > 0.0:
+                now_s = time.perf_counter()
+                if next_tick_s is None:
+                    next_tick_s = now_s + rollout_period_s
+                sleep_s = next_tick_s - now_s
+                if sleep_s > 0.0:
+                    time.sleep(sleep_s)
+                    next_tick_s += rollout_period_s
+                else:
+                    # If simulation is slower than target playback, resync to avoid drift.
+                    next_tick_s = now_s
+
+            if record_enabled:
+                base_env = getattr(env, "base_env", env)
+                num_envs = int(base_env.num_envs)
+                env_id = min(max(int(rollout_record_env_id), 0), max(0, num_envs - 1))
+                qpos_t = base_env.sim.data.qpos[env_id].detach().cpu().float().numpy().copy()
+                qvel_t = base_env.sim.data.qvel[env_id].detach().cpu().float().numpy().copy()
+                record_qpos.append(qpos_t)
+                record_qvel.append(qvel_t)
+
+            if rollout_max_steps > 0 and (i + 1) >= rollout_max_steps:
+                break
+
+    if record_enabled:
+        if len(record_qpos) == 0:
+            print("[WARN] rollout_record_path is set but no frames were recorded.")
+        else:
+            base_env = getattr(env, "base_env", env)
+            qpos = np.asarray(record_qpos, dtype=np.float32)
+            qvel = np.asarray(record_qvel, dtype=np.float32)
+            if qpos.shape[-1] < 7 or qvel.shape[-1] < 6:
+                print(
+                    "[WARN] Recorded qpos/qvel dims are too small for motion format export: "
+                    f"qpos={qpos.shape}, qvel={qvel.shape}"
+                )
+            else:
+                root_pos = qpos[:, :3]
+                root_rot_wxyz = qpos[:, 3:7]
+                root_rot_xyzw = np.concatenate([root_rot_wxyz[:, 1:], root_rot_wxyz[:, :1]], axis=-1)
+                dof_pos = qpos[:, 7:]
+                dof_vel = qvel[:, 6:]
+                step_dt = float(base_env.step_dt)
+                physics_dt = float(base_env.physics_dt)
+                fps = 1.0 / max(step_dt, 1.0e-8)
+
+                save_path = Path(rollout_record_path).expanduser()
+                if not save_path.is_absolute():
+                    save_path = (Path.cwd() / save_path).resolve()
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(
+                    str(save_path),
+                    root_pos=root_pos.astype(np.float32),
+                    root_rot=root_rot_xyzw.astype(np.float32),
+                    dof_pos=dof_pos.astype(np.float32),
+                    dof_vel=dof_vel.astype(np.float32),
+                    qpos=qpos.astype(np.float32),
+                    qvel=qvel.astype(np.float32),
+                    fps=np.array([fps], dtype=np.float32),
+                    step_dt=np.array([step_dt], dtype=np.float32),
+                    physics_dt=np.array([physics_dt], dtype=np.float32),
+                )
+                print(
+                    f"[INFO] Saved offline rollout: {save_path} | frames={qpos.shape[0]}, "
+                    f"fps={fps:.3f}, step_dt={step_dt:.4f}, physics_dt={physics_dt:.6f}"
+                )
     
     env.close()

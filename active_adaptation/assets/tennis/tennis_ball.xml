@@ -1,21 +1,9 @@
 <mujoco model="tennis_ball">
   <worldbody>
     <body name="tennis_ball" pos="0 0 1.2">
-      <freejoint/>
-      <geom
-        name="tennis_ball_geom"
-        type="sphere"
-        size="0.0335"
-        mass="0.057"
-        rgba="1 0 0 1.0"
-        condim="3"
-        friction="0.20 0.01 0.001"
-        solref="0.010 0.65"
-        solimp="0.95 0.995 0.001 0.5 2"
-        contype="1"
-        conaffinity="14"
-      />
-      <site name="tennis_ball_center" pos="0 0 0" size="0.005"/>
+      <freejoint />
+      <geom name="tennis_ball_geom" type="sphere" size="0.0335" mass="0.057" rgba="1 0 0 1.0" condim="3" friction="0.20 0.01 0.001" solref="0.010 0.035" solimp="0.95 0.995 0.001 0.5 2" contype="0" conaffinity="14" />
+      <site name="tennis_ball_center" pos="0 0 0" size="0.005" />
     </body>
   </worldbody>
 </mujoco>

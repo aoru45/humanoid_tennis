@@ -192,17 +192,91 @@ def _extract_scalar_fps(value, default: float = 50.0) -> float:
     return float(arr.reshape(-1)[0])
 
 
-def _convert_single_npz(src: Path, dst: Path, output_fps: float) -> None:
-    with np.load(src, allow_pickle=True) as data:
-        required = {"body_pos_w", "body_quat_w", "joint_pos", "fps"}
-        missing = required - set(data.files)
-        if missing:
-            raise KeyError(f"{src} is missing keys: {sorted(missing)}")
+def _extract_common_arrays(data, src: Path, output_fps: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    keys = set(data.files)
 
+    # Format A: mjlab-exported format (already supported before).
+    if {"body_pos_w", "body_quat_w", "joint_pos"}.issubset(keys):
         body_pos_w = np.asarray(data["body_pos_w"], dtype=np.float32)
         body_quat_w = np.asarray(data["body_quat_w"], dtype=np.float32)
         dof_pos = np.asarray(data["joint_pos"], dtype=np.float32)
-        _ = _extract_scalar_fps(data["fps"], default=output_fps)
+        if "fps" in keys:
+            _ = _extract_scalar_fps(data["fps"], default=output_fps)
+        return body_pos_w, body_quat_w, dof_pos
+
+    # Format B: LA/legacy motion dump with qpos/xpos/xquat.
+    if {"qpos", "xpos", "xquat"}.issubset(keys):
+        qpos = np.asarray(data["qpos"], dtype=np.float32)
+        xpos = np.asarray(data["xpos"], dtype=np.float32)
+        xquat = np.asarray(data["xquat"], dtype=np.float32)
+        if "frequency" in keys:
+            _ = _extract_scalar_fps(data["frequency"], default=output_fps)
+        elif "fps" in keys:
+            _ = _extract_scalar_fps(data["fps"], default=output_fps)
+
+        if qpos.ndim != 2:
+            raise ValueError(f"{src}: unexpected qpos shape {qpos.shape}")
+        if xpos.ndim != 3 or xpos.shape[-1] != 3:
+            raise ValueError(f"{src}: unexpected xpos shape {xpos.shape}")
+        if xquat.ndim != 3 or xquat.shape[-1] != 4:
+            raise ValueError(f"{src}: unexpected xquat shape {xquat.shape}")
+        if xpos.shape[:2] != xquat.shape[:2]:
+            raise ValueError(f"{src}: mismatched xpos/xquat shape {xpos.shape} vs {xquat.shape}")
+        if xpos.shape[0] != qpos.shape[0]:
+            raise ValueError(f"{src}: frame mismatch xpos={xpos.shape[0]} qpos={qpos.shape[0]}")
+
+        if "body_names" in keys:
+            body_names = [str(x) for x in np.asarray(data["body_names"]).tolist()]
+            body_index = {name: i for i, name in enumerate(body_names)}
+            missing_body = [name for name in BODY_NAMES if name not in body_index]
+            if missing_body:
+                raise KeyError(f"{src}: missing body names: {missing_body}")
+            body_cols = [body_index[name] for name in BODY_NAMES]
+            body_pos_w = xpos[:, body_cols, :]
+            body_quat_w = xquat[:, body_cols, :]
+        else:
+            # Fallback: world body at index 0, followed by BODY_NAMES in order.
+            if xpos.shape[1] >= (len(BODY_NAMES) + 1):
+                body_pos_w = xpos[:, 1 : 1 + len(BODY_NAMES), :]
+                body_quat_w = xquat[:, 1 : 1 + len(BODY_NAMES), :]
+            elif xpos.shape[1] == len(BODY_NAMES):
+                body_pos_w = xpos
+                body_quat_w = xquat
+            else:
+                raise ValueError(
+                    f"{src}: cannot infer body mapping from xpos shape {xpos.shape}, expected >= {len(BODY_NAMES)} bodies."
+                )
+
+        # qpos = [root_pos(3), root_quat(4), dof_pos...]
+        if qpos.shape[1] < (7 + len(JOINT_NAMES)):
+            raise ValueError(
+                f"{src}: unexpected qpos width {qpos.shape[1]}, expected at least {7 + len(JOINT_NAMES)}."
+            )
+        if "joint_names" in keys:
+            joint_names = [str(x) for x in np.asarray(data["joint_names"]).tolist()]
+            if len(joint_names) >= 1 and joint_names[0] == "root":
+                joint_index = {name: i for i, name in enumerate(joint_names[1:])}
+                missing_joint = [name for name in JOINT_NAMES if name not in joint_index]
+                if missing_joint:
+                    raise KeyError(f"{src}: missing joint names: {missing_joint}")
+                qpos_cols = [7 + joint_index[name] for name in JOINT_NAMES]
+                dof_pos = qpos[:, qpos_cols]
+            else:
+                dof_pos = qpos[:, 7 : 7 + len(JOINT_NAMES)]
+        else:
+            dof_pos = qpos[:, 7 : 7 + len(JOINT_NAMES)]
+
+        return body_pos_w.astype(np.float32), body_quat_w.astype(np.float32), dof_pos.astype(np.float32)
+
+    raise KeyError(
+        f"{src}: unsupported npz format. Need either "
+        "{body_pos_w,body_quat_w,joint_pos} or {qpos,xpos,xquat}. keys={sorted(keys)}"
+    )
+
+
+def _convert_single_npz(src: Path, dst: Path, output_fps: float) -> None:
+    with np.load(src, allow_pickle=True) as data:
+        body_pos_w, body_quat_w, dof_pos = _extract_common_arrays(data, src=src, output_fps=output_fps)
 
     if body_pos_w.ndim != 3 or body_pos_w.shape[-1] != 3:
         raise ValueError(f"{src}: unexpected body_pos_w shape {body_pos_w.shape}")

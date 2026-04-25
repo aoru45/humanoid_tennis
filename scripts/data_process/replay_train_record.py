@@ -308,6 +308,7 @@ def _find_launch_events(
     local_y_min: float,
     vel_y_max: float,
     z_min: float,
+    teleport_pos_jump_min: float,
 ) -> tuple[np.ndarray, dict]:
     steps = int(qpos.shape[0])
     if steps == 0:
@@ -319,16 +320,30 @@ def _find_launch_events(
     local_y = ball_pos[:, 1] - root_xy[:, 1]
     vel_y = ball_vel[:, 1]
     z = ball_pos[:, 2]
+    pos_jump = np.zeros((steps,), dtype=np.float32)
+    if steps > 1:
+        pos_jump[1:] = np.linalg.norm(ball_pos[1:] - ball_pos[:-1], axis=-1)
 
     launch_mask = (local_y > float(local_y_min)) & (vel_y < float(vel_y_max)) & (z > float(z_min))
     rising = launch_mask & np.concatenate((np.ones((1,), dtype=bool), ~launch_mask[:-1]))
-    launch_starts = np.flatnonzero(rising).astype(np.int64)
+    teleport = pos_jump >= float(teleport_pos_jump_min)
+
+    # Prefer teleport-based launch detection (ball relaunch writes root state and causes
+    # a large position jump between control steps). This avoids many false positives from
+    # pure kinematic thresholding during regular rally motion.
+    launch_starts = np.flatnonzero(teleport).astype(np.int64)
+    if launch_mask[0]:
+        launch_starts = np.unique(np.concatenate((np.asarray([0], dtype=np.int64), launch_starts))).astype(np.int64)
+    if launch_starts.size == 0:
+        launch_starts = np.flatnonzero(rising).astype(np.int64)
 
     diag = {
         "local_y": local_y,
         "vel_y": vel_y,
         "z": z,
         "launch_mask": launch_mask,
+        "pos_jump": pos_jump,
+        "teleport": teleport,
     }
     return launch_starts, diag
 
@@ -343,6 +358,7 @@ def _summarize_launch_events(
     local_y_min: float,
     vel_y_max: float,
     z_min: float,
+    teleport_pos_jump_min: float,
     verbose: bool,
 ) -> list[np.ndarray]:
     launch_steps_all: list[np.ndarray] = []
@@ -357,6 +373,7 @@ def _summarize_launch_events(
             local_y_min=local_y_min,
             vel_y_max=vel_y_max,
             z_min=z_min,
+            teleport_pos_jump_min=teleport_pos_jump_min,
         )
         launch_steps_all.append(launch_steps)
     if verbose:
@@ -394,6 +411,12 @@ def main():
     parser.add_argument("--start-step", type=int, default=None, help="Inclusive start frame index.")
     parser.add_argument("--end-step", type=int, default=None, help="Exclusive end frame index.")
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier.")
+    parser.add_argument(
+        "--viewer-max-fps",
+        type=float,
+        default=45.0,
+        help="Throttle Viser updates to at most this FPS. <=0 disables throttling.",
+    )
     parser.add_argument("--env-index", type=int, default=0, help="Initial env slot index to replay.")
     parser.add_argument(
         "--from-launch",
@@ -454,6 +477,15 @@ def main():
         type=float,
         default=0.8,
         help="Launch detection threshold: ball z > this value.",
+    )
+    parser.add_argument(
+        "--launch-teleport-jump-min",
+        type=float,
+        default=2.5,
+        help=(
+            "Launch detection threshold: ||ball_pos[t]-ball_pos[t-1]|| >= this value (meters). "
+            "Used to robustly detect relaunch teleports."
+        ),
     )
     parser.add_argument(
         "--racket-body-name",
@@ -573,6 +605,7 @@ def main():
         local_y_min=float(args.launch_local_y_min),
         vel_y_max=float(args.launch_vel_y_max),
         z_min=float(args.launch_z_min),
+        teleport_pos_jump_min=float(args.launch_teleport_jump_min),
         verbose=bool(args.list_launches or args.auto_select_env_with_launch),
     )
     effective_env_index = selected_env_index
@@ -722,6 +755,7 @@ def main():
                     local_y_min=float(args.launch_local_y_min),
                     vel_y_max=float(args.launch_vel_y_max),
                     z_min=float(args.launch_z_min),
+                    teleport_pos_jump_min=float(args.launch_teleport_jump_min),
                 )[1]
                 local_y = float(launch_diag["local_y"][launch_step])
                 vel_y = float(launch_diag["vel_y"][launch_step])
@@ -788,6 +822,14 @@ def main():
     print("Press Ctrl+C to exit.")
 
     frame_dt = float(step_dt) / float(args.speed)
+    viewer_step_interval = 1
+    if float(args.viewer_max_fps) > 0.0:
+        viewer_step_interval = max(1, int(round(1.0 / (float(args.viewer_max_fps) * max(frame_dt, 1.0e-6)))))
+    print(
+        "[INFO] viewer throttle:",
+        f"max_fps={float(args.viewer_max_fps):.1f}",
+        f"step_interval={viewer_step_interval}",
+    )
     start_time = time.perf_counter()
     racket_debug_prev_on = False
     try:
@@ -798,83 +840,85 @@ def main():
                 start_time = time.perf_counter()
 
             frame_idx = int(state["start_step"]) + int(state["segment_idx"])
-            qpos_t = torch.as_tensor(state["qpos_slot"][frame_idx], device=device, dtype=torch.float32)
-            qvel_t = torch.as_tensor(state["qvel_slot"][frame_idx], device=device, dtype=torch.float32)
+            should_render = ((int(state["segment_idx"]) % viewer_step_interval) == 0) or (int(state["segment_idx"]) == 0)
+            if should_render:
+                qpos_t = torch.as_tensor(state["qpos_slot"][frame_idx], device=device, dtype=torch.float32)
+                qvel_t = torch.as_tensor(state["qvel_slot"][frame_idx], device=device, dtype=torch.float32)
 
-            sim.data.qpos[:] = qpos_t
-            sim.data.qvel[:] = qvel_t
-            sim.forward()
-            scene.update(physics_dt)
+                sim.data.qpos[:] = qpos_t
+                sim.data.qvel[:] = qvel_t
+                sim.forward()
+                scene.update(physics_dt)
 
-            show_racket_debug = bool(racket_center_debug_checkbox.value)
-            if show_racket_debug:
-                if not viser_scene.debug_visualization_enabled:
-                    viser_scene.debug_visualization_enabled = True
-                viser_scene.clear()
-                racket_mount_w, racket_center_w = _compute_racket_center_w(
-                    robot=robot,
-                    racket_body_id=racket_body_id,
-                    racket_center_offset=racket_center_offset,
-                )
-                _, face_plus_dir_w, face_minus_dir_w = _compute_racket_face_dirs_w(
-                    robot=robot,
-                    racket_body_id=racket_body_id,
-                    racket_center_offset=racket_center_offset,
-                    face_axis_local=racket_face_axis_local,
-                )
-                ball_pos_w = scene["tennis_ball"].data.root_link_pos_w
-                center_radius = max(float(args.racket_center_radius), 1.0e-3)
-                face_len = float(racket_face_length)
-                face_plus_end_w = racket_center_w + face_plus_dir_w * face_len
-                face_minus_end_w = racket_center_w + face_minus_dir_w * face_len
-                viser_scene.add_sphere(
-                    racket_mount_w[0],
-                    radius=center_radius * 0.55,
-                    color=(1.0, 0.6, 0.0, 0.95),
-                )
-                viser_scene.add_sphere(
-                    racket_center_w[0],
-                    radius=center_radius,
-                    color=(0.1, 1.0, 0.1, 0.95),
-                )
-                viser_scene.add_cylinder(
-                    racket_mount_w[0],
-                    racket_center_w[0],
-                    radius=max(center_radius * 0.20, 0.003),
-                    color=(0.1, 1.0, 0.1, 0.80),
-                )
-                viser_scene.add_cylinder(
-                    racket_center_w[0],
-                    face_plus_end_w[0],
-                    radius=max(center_radius * 0.16, 0.0028),
-                    color=(1.0, 0.15, 0.15, 0.95),
-                )
-                viser_scene.add_cylinder(
-                    racket_center_w[0],
-                    face_minus_end_w[0],
-                    radius=max(center_radius * 0.16, 0.0028),
-                    color=(0.15, 0.35, 1.0, 0.95),
-                )
-                viser_scene.add_sphere(
-                    face_plus_end_w[0],
-                    radius=max(center_radius * 0.42, 0.010),
-                    color=(1.0, 0.15, 0.15, 0.95),
-                )
-                viser_scene.add_sphere(
-                    face_minus_end_w[0],
-                    radius=max(center_radius * 0.42, 0.010),
-                    color=(0.15, 0.35, 1.0, 0.95),
-                )
-                viser_scene.add_sphere(
-                    ball_pos_w[0],
-                    radius=max(center_radius * 0.45, 0.015),
-                    color=(0.15, 0.55, 1.0, 0.90),
-                )
-            elif racket_debug_prev_on:
-                viser_scene.clear()
-            racket_debug_prev_on = show_racket_debug
+                show_racket_debug = bool(racket_center_debug_checkbox.value)
+                if show_racket_debug:
+                    if not viser_scene.debug_visualization_enabled:
+                        viser_scene.debug_visualization_enabled = True
+                    viser_scene.clear()
+                    racket_mount_w, racket_center_w = _compute_racket_center_w(
+                        robot=robot,
+                        racket_body_id=racket_body_id,
+                        racket_center_offset=racket_center_offset,
+                    )
+                    _, face_plus_dir_w, face_minus_dir_w = _compute_racket_face_dirs_w(
+                        robot=robot,
+                        racket_body_id=racket_body_id,
+                        racket_center_offset=racket_center_offset,
+                        face_axis_local=racket_face_axis_local,
+                    )
+                    ball_pos_w = scene["tennis_ball"].data.root_link_pos_w
+                    center_radius = max(float(args.racket_center_radius), 1.0e-3)
+                    face_len = float(racket_face_length)
+                    face_plus_end_w = racket_center_w + face_plus_dir_w * face_len
+                    face_minus_end_w = racket_center_w + face_minus_dir_w * face_len
+                    viser_scene.add_sphere(
+                        racket_mount_w[0],
+                        radius=center_radius * 0.55,
+                        color=(1.0, 0.6, 0.0, 0.95),
+                    )
+                    viser_scene.add_sphere(
+                        racket_center_w[0],
+                        radius=center_radius,
+                        color=(0.1, 1.0, 0.1, 0.95),
+                    )
+                    viser_scene.add_cylinder(
+                        racket_mount_w[0],
+                        racket_center_w[0],
+                        radius=max(center_radius * 0.20, 0.003),
+                        color=(0.1, 1.0, 0.1, 0.80),
+                    )
+                    viser_scene.add_cylinder(
+                        racket_center_w[0],
+                        face_plus_end_w[0],
+                        radius=max(center_radius * 0.16, 0.0028),
+                        color=(1.0, 0.15, 0.15, 0.95),
+                    )
+                    viser_scene.add_cylinder(
+                        racket_center_w[0],
+                        face_minus_end_w[0],
+                        radius=max(center_radius * 0.16, 0.0028),
+                        color=(0.15, 0.35, 1.0, 0.95),
+                    )
+                    viser_scene.add_sphere(
+                        face_plus_end_w[0],
+                        radius=max(center_radius * 0.42, 0.010),
+                        color=(1.0, 0.15, 0.15, 0.95),
+                    )
+                    viser_scene.add_sphere(
+                        face_minus_end_w[0],
+                        radius=max(center_radius * 0.42, 0.010),
+                        color=(0.15, 0.35, 1.0, 0.95),
+                    )
+                    viser_scene.add_sphere(
+                        ball_pos_w[0],
+                        radius=max(center_radius * 0.45, 0.015),
+                        color=(0.15, 0.55, 1.0, 0.90),
+                    )
+                elif racket_debug_prev_on:
+                    viser_scene.clear()
+                racket_debug_prev_on = show_racket_debug
 
-            viser_scene.update(_to_cpu_wp_data(sim.data))
+                viser_scene.update(_to_cpu_wp_data(sim.data))
 
             state["segment_idx"] = int(state["segment_idx"]) + 1
             if int(state["segment_idx"]) >= int(state["segment_steps"]):

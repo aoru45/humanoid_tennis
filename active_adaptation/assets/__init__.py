@@ -1,5 +1,11 @@
 import os
-from .humanoid import G1_CFG, G1_COL_FULL, G1_COL_FULL_SELF, G1_COL_FULL_SELF_RACKET
+from .humanoid import (
+    G1_CFG,
+    G1_COL_FULL,
+    G1_COL_FULL_SELF,
+    G1_COL_FULL_SELF_RACKET,
+    G1_COL_FULL_SELF_RACKET_NOSELF,
+)
 from .tennis import get_tennis_ball_cfg, get_tennis_court_cfg
 
 ASSET_PATH = os.path.dirname(__file__)
@@ -10,6 +16,8 @@ ROBOTS = {
     "g1_col_full_self": G1_COL_FULL_SELF,
     "g1_col_full_self_racket": G1_COL_FULL_SELF_RACKET,
     "g1_racket": G1_COL_FULL_SELF_RACKET,
+    "g1_col_full_self_racket_noself": G1_COL_FULL_SELF_RACKET_NOSELF,
+    "g1_racket_noself": G1_COL_FULL_SELF_RACKET_NOSELF,
 }
 
 

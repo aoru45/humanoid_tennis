@@ -400,7 +400,29 @@ class CatTensors(ModBase):
 
 
 def collect_info(infos, prefix=""):
-    return {prefix+k: v.mean().item() for k, v in torch.stack(infos).items()}
+    if len(infos) == 0:
+        return {}
+    target_device = None
+    for info in infos:
+        for _, v in info.items():
+            if isinstance(v, torch.Tensor):
+                target_device = v.device
+                break
+        if target_device is not None:
+            break
+    if target_device is None:
+        target_device = torch.device("cpu")
+
+    normalized = []
+    for info in infos:
+        td_data = {}
+        for k, v in info.items():
+            if isinstance(v, torch.Tensor):
+                td_data[k] = v.to(target_device)
+            else:
+                td_data[k] = torch.tensor(float(v), device=target_device)
+        normalized.append(TensorDict(td_data, []))
+    return {prefix + k: v.mean().item() for k, v in torch.stack(normalized).items()}
 
 
 def normalize(x: torch.Tensor, subtract_mean: bool=False):

@@ -242,7 +242,7 @@ class SymmetricVecNorm(VecNorm):
         return (value - mean) / std.clamp_min(self.eps)
 
 
-def make_env_policy(cfg: DictConfig):
+def make_env_policy(cfg: DictConfig, return_checkpoint_state: bool = False):
     OmegaConf.set_struct(cfg, False)
     from active_adaptation.envs import SimpleEnv
     from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter
@@ -402,6 +402,8 @@ def make_env_policy(cfg: DictConfig):
         transform.append(primer)
     env = TransformedEnv(env.base_env, transform)
 
+    if return_checkpoint_state:
+        return env, policy, vecnorm, primer, state_dict
     return env, policy, vecnorm, primer
 
 

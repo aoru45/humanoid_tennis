@@ -18,8 +18,8 @@ student_train: false
 
 sim:
   step_dt: 0.02
-  isaac_physics_dt: 0.005
-  mujoco_physics_dt: 0.005
+  isaac_physics_dt: 0.0005
+  mujoco_physics_dt: 0.0005
 
 
 command: {}

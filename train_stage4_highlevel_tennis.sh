@@ -3,45 +3,29 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-NPROC="${NPROC:-4}"
-NUM_ENVS="${NUM_ENVS:-4096}"
-WANDB_ENTITY="${WANDB_ENTITY:-aoru45}"
-WANDB_PROJECT="${WANDB_PROJECT:-gentle_humanoid}"
 RUN_NAME="${RUN_NAME:-tennis-highlevel-$(date +%m%d-%H%M)}"
-USE_RACKET="${USE_RACKET:-1}"
-ROBOT_NAME="${ROBOT_NAME:-g1_col_full_self_racket}"
-EXP_NAME="${EXP_NAME:-highlevel}"
-
 RUN_NAME_SLUG="$(printf '%s' "${RUN_NAME}" | tr '[:space:]/' '__' | tr -cd '[:alnum:]_.-')"
-if [[ -z "${RUN_NAME_SLUG}" ]]; then
-  RUN_NAME_SLUG="run"
-fi
+
 DEFAULT_HYDRA_RUN_DIR="./outputs/\${now:%Y-%m-%d}/\${now:%H-%M-%S}-${RUN_NAME_SLUG}"
 HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-$DEFAULT_HYDRA_RUN_DIR}"
 
-# STAGE_PULSE_CKPT="${STAGE_PULSE_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-18/pulse_w_racket/wandb/run-20260418_010213-fy4oipc6/files/checkpoint_final.pt}"
-STAGE_PULSE_CKPT="${STAGE_PULSE_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/pulse_more_smooth/checkpoint_final.pt}"
-# STAGE_PULSE_CKPT="${STAGE_PULSE_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/2026-04-17/pulse_w_racket_tennis_only/wandb/run-20260417_230629-nxafmogr/files/checkpoint_final.pt}"
-# STAGE_PULSE_CKPT="${STAGE_PULSE_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/pulse_more/checkpoint_38700.pt}"
-LAUNCH_BANK_FILE="${LAUNCH_BANK_FILE:-/mnt/data/xueaoru/motion_tracking/data/tennis_launch_bank/highlevel_launch_bank.npz}"
 
-
-echo "[INFO] Launch stage-4 high-level tennis training with ${NPROC} GPUs, num_envs=${NUM_ENVS}"
-echo "[INFO] WandB entity=${WANDB_ENTITY}, project=${WANDB_PROJECT}, name=${RUN_NAME}"
-echo "[INFO] Pulse checkpoint source=${STAGE_PULSE_CKPT}"
-echo "[INFO] launch_bank_file=${LAUNCH_BANK_FILE}"
-echo "[INFO] robot_name=${ROBOT_NAME} (USE_RACKET=${USE_RACKET})"
-echo "[INFO] exp=${EXP_NAME}"
-echo "[INFO] hydra.run.dir=${HYDRA_RUN_DIR}"
-
-uv run torchrun --nproc_per_node="${NPROC}" scripts/train.py \
-  task=G1/G1_tennis_highlevel "+exp=${EXP_NAME}" \
-  "task.robot.name=${ROBOT_NAME}" \
-  "checkpoint_path=${STAGE_PULSE_CKPT}" \
-  "task.command.launch_bank_file=${LAUNCH_BANK_FILE}" \
-  "task.num_envs=${NUM_ENVS}" \
+uv run torchrun --nproc_per_node=4 scripts/train.py \
+  task=G1/G1_tennis_highlevel "+exp=highlevel" \
+  "task.robot.name=g1_col_full_self_racket" \
+  "checkpoint_path=/mnt/data/xueaoru/motion_tracking/outputs/2026-04-25/10-11-22-tennis-highlevel-0425-1011/checkpoints/checkpoint_4800.pt" \
+  "task.command.launch_bank_easy_file=/mnt/data/xueaoru/motion_tracking/data/tennis_launch_bank/highlevel_subsets/launch_bank_easy.npz" \
+  "task.command.launch_bank_medium_file=/mnt/data/xueaoru/motion_tracking/data/tennis_launch_bank/highlevel_subsets/launch_bank_medium.npz" \
+  "task.command.launch_bank_hard_file=/mnt/data/xueaoru/motion_tracking/data/tennis_launch_bank/highlevel_subsets/launch_bank_hard.npz" \
+  "save_interval=300" \
+  "start_iter=0" \
+  "task.num_envs=4096" \
   "hydra.run.dir=${HYDRA_RUN_DIR}" \
-  wandb.mode=online \
-  +wandb.entity="${WANDB_ENTITY}" \
-  "wandb.project=${WANDB_PROJECT}" \
-  "wandb.name=${RUN_NAME}"
+  "wandb.mode=online" \
+  "+wandb.entity=aoru45" \
+  "wandb.project=gentle_humanoid" \
+  "wandb.name=${RUN_NAME}" \
+  "resume_load_train_state=False" \
+  "resume_wandb=False" \
+  "resume_load_env=False" \
+  "resume_load_rng=False"
