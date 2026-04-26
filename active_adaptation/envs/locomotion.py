@@ -22,6 +22,7 @@ class SimpleEnv(_Env):
         from mjlab.sim import MujocoCfg, SimulationCfg
         from mjlab.scene import Scene
         from mjlab.sim.sim import Simulation
+        from mjlab.utils import spec_config as spec_cfg
 
         mjlab_dt = self.cfg.sim.get("mjlab_physics_dt", None)
         if mjlab_dt is None:
@@ -59,6 +60,18 @@ class SimpleEnv(_Env):
                 )
             if bool(tennis_cfg.get("add_ball", False)):
                 scene_cfg.entities["tennis_ball"] = get_tennis_ball_cfg()
+        if 1:
+            # Add ball-specific collision bit (16) to terrain conaffinity while
+            # preserving existing robot-foot collisions on bit 1.
+            scene_cfg.terrain.collisions = (
+                spec_cfg.CollisionCfg(
+                    geom_names_expr=(".*",),
+                    contype=1,
+                    conaffinity=17,
+                    condim=3,
+                    disable_other_geoms=False,
+                ),
+            )
 
         # contact_cfg = ContactSensorCfg(
         #     name="contact_forces",
@@ -129,6 +142,42 @@ class SimpleEnv(_Env):
                 debug=False,
             )
             sensors.extend([racket_ball_sensor, ball_net_sensor, ball_court_sensor])
+            
+            # Contact sensor to detect racket contacts against robot body geoms.
+            racket_body_sensor = ContactSensorCfg(
+                name="racket_body_contact",
+                primary=ContactMatch(mode="geom", pattern="tennis_racket_collision", entity="robot"),
+                secondary=ContactMatch(
+                    mode="geom",
+                    pattern=".*_collision",
+                    entity="robot",
+                    exclude=("tennis_racket_collision",),
+                ),
+                fields=("found",),
+                reduce="maxforce",
+                secondary_policy="any",
+                global_frame=False,
+                num_slots=1,
+                history_length=decimation_est,
+                debug=False,
+            )
+            sensors.append(racket_body_sensor)
+
+
+            ball_default_ground_sensor = ContactSensorCfg(
+                name="ball_default_ground_contact",
+                primary=ContactMatch(mode="geom", pattern="tennis_ball_geom", entity="tennis_ball"),
+                secondary=ContactMatch(mode="body", pattern="terrain"),
+                fields=("found", "force"),
+                reduce="maxforce",
+                global_frame=False,
+                num_slots=1,
+                history_length=decimation_est,
+                debug=False,
+            )
+            sensors.append(ball_default_ground_sensor)
+            
+           
             if bool(tennis_cfg.get("racket_court_collision", False)):
                 racket_court_sensor = ContactSensorCfg(
                     name="racket_court_contact",
@@ -152,12 +201,26 @@ class SimpleEnv(_Env):
         mujoco_ccd_iterations = int(self.cfg.sim.get("mujoco_ccd_iterations", 50))
         mujoco_multiccd = bool(self.cfg.sim.get("mujoco_multiccd", False))
         # Guard against OOM in large-batch training (e.g., 2k~4k envs/GPU):
-        # collision buffers in mujoco_warp can scale aggressively with nconmax
-        # and multiccd, causing huge device allocations.
-        if int(self.cfg.num_envs) >= 8192:
-            nconmax = min(nconmax, 300)
-            njmax = min(njmax, 1200)
-            mujoco_ccd_iterations = min(mujoco_ccd_iterations, 50)
+        # collision buffers in mujoco_warp scale with num_envs * nconmax *
+        # (10 + 2*ccd_iterations). Keep these bounded for large jobs.
+        if int(self.cfg.num_envs) >= 4096:
+            capped_nconmax = min(nconmax, 192)
+            capped_njmax = min(njmax, 900)
+            capped_ccd = min(mujoco_ccd_iterations, 96)
+            if (
+                capped_nconmax != nconmax
+                or capped_njmax != njmax
+                or capped_ccd != mujoco_ccd_iterations
+            ):
+                print(
+                    "[WARN] task.num_envs is large; capping mujoco buffers for stability: "
+                    f"nconmax {nconmax}->{capped_nconmax}, "
+                    f"njmax {njmax}->{capped_njmax}, "
+                    f"ccd_iterations {mujoco_ccd_iterations}->{capped_ccd}."
+                )
+            nconmax = capped_nconmax
+            njmax = capped_njmax
+            mujoco_ccd_iterations = capped_ccd
             if mujoco_multiccd:
                 print("[WARN] task.num_envs is large; forcing mujoco_multiccd=false to avoid GPU OOM.")
             mujoco_multiccd = False

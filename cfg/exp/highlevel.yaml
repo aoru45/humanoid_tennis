@@ -9,16 +9,17 @@ task:
 algo:
   in_keys: [policy, pulse_policy, priv, priv_critic]
   symmetry_enabled: false
-  init_noise_scale: 0.20
-  entropy_coef_start: 0.005
+  train_every: 8
+  init_noise_scale: 0.30
+  entropy_coef_start: 0.012
   entropy_coef_end: 0.0005
-  desired_kl: 0.012
+  desired_kl: 0.020
   value_norm: true
-  adv_reward_clamp_min: null
-  highlevel_lab_lambda: 2
+  adv_reward_clamp_min: -120.0
+  highlevel_lab_lambda: 1
   pulse_logvar_max: 2
   highlevel_wrist_residual_enabled: true
   highlevel_wrist_joint_patterns: [right_wrist_.*_joint]
   highlevel_wrist_action_scale: 1.0
 
-total_frames: 6200_000_000
+total_frames: 5_000_000_000

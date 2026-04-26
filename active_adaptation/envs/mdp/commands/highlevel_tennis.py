@@ -299,6 +299,9 @@ class HighLevelTennisCommand(Command):
         self._ball_court_contact_sensor = None
         if "ball_court_contact" in self.env.scene.sensors:
             self._ball_court_contact_sensor = self.env.scene["ball_court_contact"]
+        self._racket_body_contact_sensor = None
+        if "racket_body_contact" in self.env.scene.sensors:
+            self._racket_body_contact_sensor = self.env.scene["racket_body_contact"]
 
         ball_body_ids, _ = self.ball.find_bodies("tennis_ball")
         if len(ball_body_ids) != 1:
@@ -342,9 +345,11 @@ class HighLevelTennisCommand(Command):
         self.racket_ball_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.ball_net_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.ball_court_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.racket_body_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.racket_ball_contact_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.ball_net_contact_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.ball_court_contact_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.racket_body_contact_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.stroke_style_violation_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.prehit_zone = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.prehit_zone_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -488,9 +493,11 @@ class HighLevelTennisCommand(Command):
         self.racket_ball_contact[env_ids] = False
         self.ball_net_contact[env_ids] = False
         self.ball_court_contact[env_ids] = False
+        self.racket_body_contact[env_ids] = False
         self.racket_ball_contact_event[env_ids] = False
         self.ball_net_contact_event[env_ids] = False
         self.ball_court_contact_event[env_ids] = False
+        self.racket_body_contact_event[env_ids] = False
         self.hit_cooldown[env_ids] = 0
         self.pre_hit_dead_ball_steps[env_ids] = 0
         self.post_hit_dead_ball_steps[env_ids] = 0
@@ -622,6 +629,7 @@ class HighLevelTennisCommand(Command):
         prev_racket_ball = self.racket_ball_contact.clone()
         prev_ball_net = self.ball_net_contact.clone()
         prev_ball_court = self.ball_court_contact.clone()
+        prev_racket_body = self.racket_body_contact.clone()
 
         if self._racket_ball_contact_sensor is not None:
             self.racket_ball_contact[:] = self._sensor_contact_found(self._racket_ball_contact_sensor)
@@ -635,10 +643,15 @@ class HighLevelTennisCommand(Command):
             self.ball_court_contact[:] = self._sensor_contact_found(self._ball_court_contact_sensor)
         else:
             self.ball_court_contact[:] = False
+        if self._racket_body_contact_sensor is not None:
+            self.racket_body_contact[:] = self._sensor_contact_found(self._racket_body_contact_sensor)
+        else:
+            self.racket_body_contact[:] = False
 
         self.racket_ball_contact_event[:] = self.racket_ball_contact & (~prev_racket_ball)
         self.ball_net_contact_event[:] = self.ball_net_contact & (~prev_ball_net)
         self.ball_court_contact_event[:] = self.ball_court_contact & (~prev_ball_court)
+        self.racket_body_contact_event[:] = self.racket_body_contact & (~prev_racket_body)
 
     def _racket_state_w(self) -> tuple[torch.Tensor, torch.Tensor]:
         body_pos = self.asset.data.body_link_pos_w[:, self.racket_body_id]
@@ -1620,6 +1633,9 @@ class HighLevelTennisCommand(Command):
         self.env.extra["highlevel/live_ball_court_contact_ratio"] = float(
             self.ball_court_contact.float().mean().item()
         )
+        self.env.extra["highlevel/live_racket_body_contact_ratio"] = float(
+            self.racket_body_contact.float().mean().item()
+        )
         if self.debug_draw_enabled and hit_mask is not None:
             self.env.extra["highlevel/live_hit_trigger_ratio"] = float(hit_mask.float().mean().item())
 
@@ -1643,6 +1659,7 @@ class HighLevelTennisCommand(Command):
         self.racket_ball_contact_event[:] = False
         self.ball_net_contact_event[:] = False
         self.ball_court_contact_event[:] = False
+        self.racket_body_contact_event[:] = False
         self.ground_recover_event[:] = False
         self.hit_racket_speed[:] = 0.0
 
@@ -2235,6 +2252,11 @@ class HighLevelTennisCommand(Command):
     @reward
     def net_clearance(self):
         return self.net_clearance_event.float().unsqueeze(-1)
+
+    @reward
+    def racket_body_contact_penalty(self, event_only: bool = False):
+        contact = self.racket_body_contact_event if bool(event_only) else self.racket_body_contact
+        return contact.float().unsqueeze(-1)
 
     @reward
     def ball_velocity_constraint(self):

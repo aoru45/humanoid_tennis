@@ -12,9 +12,10 @@ COURT_HALF_WIDTH = 4.11
 COURT_HALF_LENGTH = 11.89
 NET_HEIGHT = 1.07
 # Ball uses receive-only mask: other geoms' contype must match this conaffinity.
-# This avoids unintended collision with default terrain(contype=1), while still
-# allowing racket(2), net(4), and dedicated court bounce surface(8).
-BALL_COLLISION_CONTYPE = 0
+# Always enable collisions with racket(2), net(4), dedicated court bounce
+# surface(8), and default terrain(1) through conaffinity=14 + terrain
+# conaffinity extension in the scene.
+BALL_COLLISION_CONTYPE = 16
 BALL_COLLISION_CONAFFINITY = 14
 NET_COLLISION_CONTYPE = 4
 NET_COLLISION_CONAFFINITY = 0  # ball-only: avoid robot/net contacts
@@ -59,6 +60,9 @@ def _resolve_court_texture(texture: str) -> str:
 
 def _build_tennis_ball_spec() -> mujoco.MjSpec:
     spec = mujoco.MjSpec.from_file(str(BALL_XML))
+    ball_geom = _find_named(spec.geoms, "tennis_ball_geom")
+    ball_geom.contype = BALL_COLLISION_CONTYPE
+    ball_geom.conaffinity = BALL_COLLISION_CONAFFINITY
     return spec
 
 

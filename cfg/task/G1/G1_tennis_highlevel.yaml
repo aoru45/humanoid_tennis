@@ -5,7 +5,7 @@ defaults:
   - _self_
 
 robot:
-  name: g1_col_full_self_racket
+  name: g1_col_full_self_racket_noself
 
 max_episode_length: 1000
 rand_init_episode_length: false
@@ -160,6 +160,7 @@ reward:
     joint_torques_l2: {weight: 1.0e-6, enabled: true, joint_names: .*}
     lower_body_action_rate_l2: {weight: -0.0016}
     whole_body_action_rate_l2: {weight: -0.0045}
+    racket_body_contact_penalty: {weight: -12.0, event_only: true}
     racket_acc_l2: {weight: -3.0e-6}
     joint_acc_l2: {weight: 6.0e-8, enabled: true, joint_names: .*}
     correction_action_l2: {weight: -0.0045}
