@@ -246,8 +246,8 @@ class MujocoBounceCalibrator:
         max_episode_steps: int,
     ) -> None:
         root = _repo_root()
-        ball_attr = _read_xml_geom_attrs(root / "active_adaptation/assets/tennis/tennis_ball.xml", "tennis_ball_geom")
-        terrain_friction, terrain_solref = _read_terrain_constants(root / "active_adaptation/assets/tennis.py")
+        ball_attr = _read_xml_geom_attrs(root / "humanoid_tennis/assets/tennis/tennis_ball.xml", "tennis_ball_geom")
+        terrain_friction, terrain_solref = _read_terrain_constants(root / "humanoid_tennis/assets/tennis.py")
 
         b_mu = _parse_floats(ball_attr.get("friction", "0.45 0.05 0.02"), 3)
         b_sr = _parse_floats(ball_attr.get("solref", "0.010 0.050"), 2)
@@ -890,7 +890,7 @@ def run_racket(args, *, ball_solref2_for_racket: float | None = None) -> RacketC
         ball_solref2 = float(args.racket_ball_solref2)
     else:
         root = _repo_root()
-        ball_attr = _read_xml_geom_attrs(root / "active_adaptation/assets/tennis/tennis_ball.xml", "tennis_ball_geom")
+        ball_attr = _read_xml_geom_attrs(root / "humanoid_tennis/assets/tennis/tennis_ball.xml", "tennis_ball_geom")
         ball_solref2 = _parse_floats(ball_attr.get("solref", "0.010 0.050"), 2)[1]
     speed_values = [float(v) for v in args.racket_incoming_speed_values]
     if len(speed_values) == 0:
@@ -996,8 +996,8 @@ def run_racket(args, *, ball_solref2_for_racket: float | None = None) -> RacketC
 def apply_xml_from_best(best_bounce: BounceCandidate | None, best_racket: RacketCandidate | None) -> None:
     root = _repo_root()
     if best_bounce is not None:
-        ball_xml = root / "active_adaptation/assets/tennis/tennis_ball.xml"
-        tennis_py = root / "active_adaptation/assets/tennis.py"
+        ball_xml = root / "humanoid_tennis/assets/tennis/tennis_ball.xml"
+        tennis_py = root / "humanoid_tennis/assets/tennis.py"
         _update_xml_geom_attrs(
             ball_xml,
             "tennis_ball_geom",
@@ -1015,7 +1015,7 @@ def apply_xml_from_best(best_bounce: BounceCandidate | None, best_racket: Racket
         )
 
     if best_racket is not None:
-        racket_xml = root / "active_adaptation/assets/G1/g1_racket.xml"
+        racket_xml = root / "humanoid_tennis/assets/G1/g1_racket.xml"
         _update_xml_geom_attrs(
             racket_xml,
             "tennis_racket_collision",

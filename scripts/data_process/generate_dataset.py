@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from active_adaptation.utils.motion import MotionDataset
+from humanoid_tennis.utils.motion import MotionDataset
 
 EXCLUDE_LABEL_PATH = Path(__file__).parent / "label.txt"
 SEED_KEEP_FILENAMES_PATH = Path("/home/axell/Desktop/dataset_new/retarget_g1/seed/keep_filenames.txt")

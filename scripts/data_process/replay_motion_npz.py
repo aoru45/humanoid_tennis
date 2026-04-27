@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as sRot
 
-from active_adaptation.assets import get_robot_cfg
+from humanoid_tennis.assets import get_robot_cfg
 
 
 def _read_scalar(npz, key: str, default: float) -> float:

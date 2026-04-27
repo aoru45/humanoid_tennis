@@ -9,7 +9,7 @@ robot:
   name: g1_col_full_self
 
 action:
-  _target_: active_adaptation.envs.mdp.action.JointPosition
+  _target_: humanoid_tennis.envs.mdp.action.JointPosition
   action_scaling: 
     .*elbow_joint: 1.0
     .*shoulder.*: 1.0
@@ -28,7 +28,7 @@ action:
 
 flags: []
 command:
-  _target_: active_adaptation.envs.mdp.commands.motion_tracking.MotionTrackingComplianceCommand
+  _target_: humanoid_tennis.envs.mdp.commands.motion_tracking.MotionTrackingComplianceCommand
   required_motion_body_patterns: ["pelvis", ".*torso.*", "head_mimic", ".*_hand_mimic", ".*wrist_roll_link.*", ".*shoulder_yaw_link", ".*hip_yaw_link", ".*knee.*", ".*ankle_roll_link"]
   keypoint_map: {}
   keypoint_patterns: ["head_mimic", ".*_hand_mimic", ".*wrist_roll_link.*", ".*shoulder_yaw_link", ".*hip_yaw_link", ".*knee.*", ".*ankle_roll_link"]

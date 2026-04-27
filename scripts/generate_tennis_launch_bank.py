@@ -11,12 +11,12 @@ from omegaconf import OmegaConf
 # Add project root to path for local imports.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from active_adaptation.utils.tennis_launch_generator import (
+from humanoid_tennis.utils.tennis_launch_generator import (
     LaunchPhysicsConfig,
     LaunchSamplerConfig,
     LaunchTrajectorySampler,
 )
-from active_adaptation.envs.mdp.commands.highlevel_tennis import HighLevelTennisConfig
+from humanoid_tennis.envs.mdp.commands.highlevel_tennis import HighLevelTennisConfig
 
 
 def build_cfg(args):

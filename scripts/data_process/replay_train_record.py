@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from active_adaptation.assets import get_robot_cfg, get_tennis_ball_cfg, get_tennis_court_cfg
-from active_adaptation.utils.math import quat_apply
+from humanoid_tennis.assets import get_robot_cfg, get_tennis_ball_cfg, get_tennis_court_cfg
+from humanoid_tennis.utils.math import quat_apply
 
 
 def _read_scalar(npz, key, default):

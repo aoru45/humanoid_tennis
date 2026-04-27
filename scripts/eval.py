@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from omegaconf import OmegaConf
 from scripts.utils.play import play
 from scripts.utils.eval import eval
-from active_adaptation.utils.wandb import (
+from humanoid_tennis.utils.wandb import (
     load_run_cfg_and_checkpoint,
     load_wandb_cfg_from_yaml,
 )

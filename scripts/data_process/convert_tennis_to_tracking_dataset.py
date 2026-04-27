@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from active_adaptation.utils.motion import MotionDataset
+from humanoid_tennis.utils.motion import MotionDataset
 
 JOINT_NAMES = [
     "left_hip_pitch_joint",

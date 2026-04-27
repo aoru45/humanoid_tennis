@@ -1,7 +1,7 @@
-# Motion Tracking & Tennis Agent
+# Humanoid Tennis
 
 ## Introduction
-This project implements a physics-based reinforcement learning framework for a humanoid robot (Unitree G1) to learn motion tracking and complex high-level tasks, specifically playing tennis. The training pipeline uses MuJoCo as the underlying physics engine and is divided into a hierarchical curriculum:
+This project implements a physics-based reinforcement learning framework for a humanoid robot (Unitree G1) to learn motion tracking and complex high-level tasks, specifically playing tennis. The Python package name is `humanoid_tennis`. The training pipeline uses MuJoCo as the underlying physics engine and is divided into a hierarchical curriculum:
 1. **Stage 1 (Motion Tracking)**: The robot learns to robustly track diverse reference motions.
 2. **Pulse Stage**: A distillation/compression phase where the robot's capabilities are encoded into a latent "Pulse" representation.
 3. **High-Level Task**: The robot utilizes the learned latent space to solve the dynamic task of intercepting and hitting a tennis ball over the net.
@@ -20,19 +20,19 @@ The training process follows a three-stage curriculum. You must complete each st
 ### 1. Train Low-Level Motion Tracking (Stage 1)
 First, train the base policy to track reference motions.
 ```bash
-./train_stage1_with_tennis.sh
+./train_track.sh
 ```
 
 ### 2. Train Pulse (Latent Representation)
 Once the base policy is trained, run the Pulse training stage to compress the skills into a manageable latent space.
 *(Make sure to update the `teacher_checkpoint_path` in your config to point to the Stage 1 output before running).*
 ```bash
-./train_pulse_with_tennis.sh
+./train_pulse.sh
 ```
 
 ### 3. Train High-Level Task (Tennis)
 Finally, train the high-level policy to play tennis using the pre-trained Pulse models.
 *(Make sure to update the `teacher_checkpoint_path` or relevant checkpoint paths in your highlevel config to point to the Pulse output).*
 ```bash
-./train_stage4_highlevel_tennis.sh
+./train_highlevel.sh
 ```

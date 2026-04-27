@@ -19,14 +19,14 @@ from tqdm import tqdm
 from setproctitle import setproctitle
 import torch.distributed as dist
 
-import active_adaptation as aa
-from active_adaptation.utils.torchrl import SyncDataCollector, TDTimeBuffer
+import humanoid_tennis as aa
+from humanoid_tennis.utils.torchrl import SyncDataCollector, TDTimeBuffer
 
 # local import
 from scripts.utils.helpers import make_env_policy, EpisodeStats, evaluate
 from scripts.utils.train_record import TrainStateRecorder
 from torchrl.envs.utils import set_exploration_type, ExplorationType
-from active_adaptation.utils.wandb import finish_wandb_run, init_wandb_run
+from humanoid_tennis.utils.wandb import finish_wandb_run, init_wandb_run
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -62,6 +62,37 @@ def _compact_wandb_metrics(info: dict) -> dict:
     return compact
 
 
+def _collect_live_reward_metrics(data, env) -> dict:
+    """Collect per-iter reward component means from rollout tensor."""
+    metrics = {}
+    base_env = getattr(env, "base_env", env)
+    reward_groups = getattr(base_env, "reward_groups", None)
+    if reward_groups is None:
+        return metrics
+
+    for group_name, reward_group in reward_groups.items():
+        # Group return
+        return_key = ("next", "stats", group_name, "return")
+        try:
+            value = data.get(return_key, None)
+            if value is not None:
+                metrics[f"highlevel/reward_live/{group_name}/return"] = float(value.float().mean().item())
+        except Exception:
+            pass
+
+        # Per-term reward components
+        funcs = getattr(reward_group, "funcs", {})
+        for rew_key in funcs.keys():
+            key = ("next", "stats", group_name, rew_key)
+            try:
+                value = data.get(key, None)
+                if value is not None:
+                    metrics[f"highlevel/reward_live/{group_name}/{rew_key}"] = float(value.float().mean().item())
+            except Exception:
+                continue
+    return metrics
+
+
 @hydra.main(config_path=CONFIG_PATH, config_name="train", version_base=None)
 def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
@@ -91,6 +122,7 @@ def main(cfg: DictConfig):
         compact_metrics = bool(cfg.wandb.get("compact_metrics", True))
         include_env_extra = bool(cfg.wandb.get("include_env_extra", True))
         include_stats_ema = bool(cfg.wandb.get("include_stats_ema", False))
+        include_live_reward = bool(cfg.wandb.get("include_live_reward", True))
         upload_checkpoints = bool(cfg.wandb.get("upload_checkpoints", False))
         checkpoint_dir = os.path.join(os.getcwd(), "checkpoints")
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -110,7 +142,7 @@ def main(cfg: DictConfig):
 
         import inspect
         import shutil
-        from active_adaptation.envs.mdp.commands.highlevel_tennis import HighLevelTennisCommand
+        from humanoid_tennis.envs.mdp.commands.highlevel_tennis import HighLevelTennisCommand
 
         source_paths = [inspect.getfile(policy.__class__)]
         highlevel_cmd_path = inspect.getfile(HighLevelTennisCommand)
@@ -241,6 +273,8 @@ def main(cfg: DictConfig):
                 info.update(env.extra)
             if include_stats_ema:
                 info.update(env.stats_ema)
+            if include_live_reward:
+                info.update(_collect_live_reward_metrics(data, env))
 
             info["env_frames"] = env_frames * aa.get_world_size()
             info["rollout_fps"] = data.numel() / rollout_time * aa.get_world_size()

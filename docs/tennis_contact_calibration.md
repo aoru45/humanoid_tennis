@@ -46,11 +46,11 @@ python scripts/calibrate_tennis_contacts_mjlab.py \
 ## What gets updated by `--apply-xml`
 
 - Ball contact softness:
-  - `active_adaptation/assets/tennis/tennis_ball.xml` (`tennis_ball_geom.solref`)
+  - `humanoid_tennis/assets/tennis/tennis_ball.xml` (`tennis_ball_geom.solref`)
 - Ground contact softness (default terrain plane used in training):
-  - `active_adaptation/assets/tennis.py` (`TERRAIN_BALL_BOUNCE_SOLREF`)
+  - `humanoid_tennis/assets/tennis.py` (`TERRAIN_BALL_BOUNCE_SOLREF`)
 - Racket contact params:
-  - `active_adaptation/assets/G1/g1_racket.xml` (`tennis_racket_collision`)
+  - `humanoid_tennis/assets/G1/g1_racket.xml` (`tennis_racket_collision`)
 
 ## References
 

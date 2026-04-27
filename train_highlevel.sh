@@ -18,7 +18,7 @@ HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-$DEFAULT_HYDRA_RUN_DIR}"
 uv run torchrun --nproc_per_node=4 scripts/train.py \
   task=G1/G1_tennis_highlevel "+exp=highlevel" \
   "task.robot.name=g1_col_full_self_racket" \
-  "checkpoint_path=/mnt/data/xueaoru/motion_tracking/outputs/2026-04-26/05-23-39-tennis-highlevel-0426-0523/checkpoints/checkpoint_1500.pt" \
+  "checkpoint_path=/mnt/data/xueaoru/motion_tracking/outputs/2026-04-27/00-49-30-tennis-highlevel-0427-0049/checkpoints/checkpoint_8400.pt" \
   "task.command.config.launch.bank.file=${LAUNCH_BANK_FILE}" \
   "task.command.config.launch.bank.easy_file=${LAUNCH_BANK_EASY_FILE}" \
   "task.command.config.launch.bank.medium_file=${LAUNCH_BANK_MEDIUM_FILE}" \

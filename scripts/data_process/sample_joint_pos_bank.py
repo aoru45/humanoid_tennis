@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-from active_adaptation.utils.motion import MotionDataset
+from humanoid_tennis.utils.motion import MotionDataset
 
 
 def _sample_from_single_dataset(

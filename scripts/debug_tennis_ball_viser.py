@@ -19,13 +19,13 @@ from omegaconf import DictConfig, OmegaConf
 # Add project root to path for local imports.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from active_adaptation.assets.tennis import (
+from humanoid_tennis.assets.tennis import (
     TERRAIN_BALL_BOUNCE_FRICTION,
     TERRAIN_BALL_BOUNCE_SOLREF,
     get_tennis_ball_cfg,
     get_tennis_court_cfg,
 )
-from active_adaptation.envs.mdp.commands.highlevel_tennis import HighLevelTennisConfig
+from humanoid_tennis.envs.mdp.commands.highlevel_tennis import HighLevelTennisConfig
 
 VALID_MODES = ("easy", "medium", "hard")
 MODE_COLORS = {

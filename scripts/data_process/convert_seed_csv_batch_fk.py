@@ -17,7 +17,7 @@ PROJECT_ROOT = THIS_FILE.parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from active_adaptation.utils.fk_helper import (  # noqa: E402
+from humanoid_tennis.utils.fk_helper import (  # noqa: E402
     MotionFKHelper,
     angvel_from_quat_wxyz_torch,
     finite_diff_torch,

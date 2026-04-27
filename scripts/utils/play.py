@@ -13,8 +13,8 @@ from omegaconf import OmegaConf
 from torchrl.envs.utils import set_exploration_type, ExplorationType
 from tensordict.nn import TensorDictSequential
 
-from active_adaptation.learning import ALGOS
-from active_adaptation.utils.export import export_onnx
+from humanoid_tennis.learning import ALGOS
+from humanoid_tennis.utils.export import export_onnx
 from scripts.utils.helpers import EpisodeStats, make_env_policy, ObsNorm
 
 def play(cfg):

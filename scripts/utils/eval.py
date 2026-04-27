@@ -8,7 +8,7 @@ from tqdm import tqdm
 from omegaconf import OmegaConf
 
 
-from active_adaptation.learning import ALGOS
+from humanoid_tennis.learning import ALGOS
 
 import logging
 from tqdm import tqdm

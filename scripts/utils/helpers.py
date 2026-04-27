@@ -6,6 +6,8 @@ import time
 import logging
 import os
 import datetime
+import sys
+import importlib
 
 from typing import Sequence, Dict, Any, Tuple, List
 from tensordict import TensorDictBase, TensorDict
@@ -16,9 +18,43 @@ from termcolor import colored
 from collections import OrderedDict
 import imageio
 from omegaconf import OmegaConf, DictConfig
-import active_adaptation.learning
-from active_adaptation.utils.wandb import parse_checkpoint_path
-import active_adaptation
+import humanoid_tennis.learning
+from humanoid_tennis.utils.wandb import parse_checkpoint_path
+import humanoid_tennis
+
+
+_LEGACY_CKPT_ALIAS_READY = False
+
+
+def _install_legacy_checkpoint_aliases() -> None:
+    """Allow loading checkpoints pickled with old module path `active_adaptation.*`."""
+    global _LEGACY_CKPT_ALIAS_READY
+    if _LEGACY_CKPT_ALIAS_READY:
+        return
+
+    # Ensure key policy modules are imported before aliasing.
+    for module_name in (
+        "humanoid_tennis.learning",
+        "humanoid_tennis.learning.ppo",
+        "humanoid_tennis.learning.ppo.common",
+        "humanoid_tennis.learning.ppo.ppo",
+        "humanoid_tennis.learning.modules",
+        "humanoid_tennis.learning.modules.distributions",
+    ):
+        try:
+            importlib.import_module(module_name)
+        except Exception:
+            pass
+
+    # Alias all already-loaded humanoid_tennis modules to active_adaptation namespace.
+    for name, module in list(sys.modules.items()):
+        if module is None:
+            continue
+        if name == "humanoid_tennis" or name.startswith("humanoid_tennis."):
+            legacy_name = "active_adaptation" + name[len("humanoid_tennis") :]
+            sys.modules.setdefault(legacy_name, module)
+
+    _LEGACY_CKPT_ALIAS_READY = True
 
 class Every:
     def __init__(self, func, steps):
@@ -188,7 +224,7 @@ import torch.distributed as dist
 from torchrl._utils import _append_last
 from torchrl.envs.transforms.transforms import _sum_left
 
-import active_adaptation as aa
+import humanoid_tennis as aa
 
 
 class SymmetricVecNorm(VecNorm):
@@ -244,7 +280,7 @@ class SymmetricVecNorm(VecNorm):
 
 def make_env_policy(cfg: DictConfig, return_checkpoint_state: bool = False):
     OmegaConf.set_struct(cfg, False)
-    from active_adaptation.envs import SimpleEnv
+    from humanoid_tennis.envs import SimpleEnv
     from torchrl.envs.transforms import TransformedEnv, Compose, InitTracker, StepCounter
     # Propagate top-level/app headless flag into task.viewer for MJLab GUI.
     if "app" in cfg and "headless" in cfg.app:
@@ -258,6 +294,7 @@ def make_env_policy(cfg: DictConfig, return_checkpoint_state: bool = False):
     if cfg.checkpoint_path is not None and aa.is_main_process():
         checkpoint_path = parse_checkpoint_path(cfg.checkpoint_path, cfg.get("wandb", None))
         aa.print(f"Loading checkpoint from {checkpoint_path}")
+        _install_legacy_checkpoint_aliases()
         state_dict = torch.load(checkpoint_path, weights_only=False)
     else:
         state_dict = {}
@@ -266,6 +303,7 @@ def make_env_policy(cfg: DictConfig, return_checkpoint_state: bool = False):
     if teacher_checkpoint_path is not None and aa.is_main_process():
         teacher_checkpoint_path = parse_checkpoint_path(teacher_checkpoint_path, cfg.get("wandb", None))
         aa.print(f"Loading teacher checkpoint from {teacher_checkpoint_path}")
+        _install_legacy_checkpoint_aliases()
         teacher_state_dict = torch.load(teacher_checkpoint_path, weights_only=False)
     else:
         teacher_state_dict = {}
@@ -342,7 +380,7 @@ def make_env_policy(cfg: DictConfig, return_checkpoint_state: bool = False):
     
     # setup policy
     policy_cls = hydra.utils.get_class(cfg.algo._target_)
-    active_adaptation.print(f"Creating policy {policy_cls} on device {base_env.device}")
+    humanoid_tennis.print(f"Creating policy {policy_cls} on device {base_env.device}")
     policy = policy_cls(
         cfg.algo,
         env.observation_spec, 
