@@ -1,3 +1,5 @@
+import logging
+
 import torch
 import einops
 from typing import Dict, Literal, Tuple, Union, TYPE_CHECKING
@@ -158,6 +160,17 @@ class JointPosition(ActionManager):
     def __call__(self, tensordict: TensorDictBase, substep: int):
         if substep == 0:
             raw_action = tensordict["action"].clamp(-10, 10)
+            if not torch.isfinite(raw_action).all():
+                bad = (~torch.isfinite(raw_action)).any(dim=-1).nonzero(as_tuple=False).squeeze(-1)
+                sample = bad[:16].detach().cpu().tolist()
+                logging.error(
+                    "[DEBUG][action] non-finite raw action detected: "
+                    f"timestamp={int(getattr(self.env, 'timestamp', -1))} "
+                    f"substep={int(substep)} num_bad_envs={int(bad.numel())} sample_env_ids={sample}"
+                )
+                raise FloatingPointError(
+                    f"Non-finite raw action: num_envs={int(bad.numel())}, sample_env_ids={sample}"
+                )
 
             ### debug symmetry
             # raw_action = self.symmetry_transforms().to(raw_action.device).forward(raw_action)
@@ -169,7 +182,29 @@ class JointPosition(ActionManager):
         idx = (self.delay - substep + self.env.decimation - 1) // self.env.decimation
         idx = idx.clamp(0, self.action_buf.shape[1] - 1)
         delayed_action = self.action_buf.take_along_dim(idx.unsqueeze(1), dim=1).squeeze(1)
+        if not torch.isfinite(delayed_action).all():
+            bad = (~torch.isfinite(delayed_action)).any(dim=-1).nonzero(as_tuple=False).squeeze(-1)
+            sample = bad[:16].detach().cpu().tolist()
+            logging.error(
+                "[DEBUG][action] non-finite delayed action detected: "
+                f"timestamp={int(getattr(self.env, 'timestamp', -1))} "
+                f"substep={int(substep)} num_bad_envs={int(bad.numel())} sample_env_ids={sample}"
+            )
+            raise FloatingPointError(
+                f"Non-finite delayed action: num_envs={int(bad.numel())}, sample_env_ids={sample}"
+            )
         self.applied_action.lerp_(delayed_action, self.alpha)
+        if not torch.isfinite(self.applied_action).all():
+            bad = (~torch.isfinite(self.applied_action)).any(dim=-1).nonzero(as_tuple=False).squeeze(-1)
+            sample = bad[:16].detach().cpu().tolist()
+            logging.error(
+                "[DEBUG][action] non-finite applied action detected: "
+                f"timestamp={int(getattr(self.env, 'timestamp', -1))} "
+                f"substep={int(substep)} num_bad_envs={int(bad.numel())} sample_env_ids={sample}"
+            )
+            raise FloatingPointError(
+                f"Non-finite applied action: num_envs={int(bad.numel())}, sample_env_ids={sample}"
+            )
 
         # Joint targets -----------------------------------------------------
         pos_tgt = self.default_joint_pos + self.offset
@@ -183,6 +218,18 @@ class JointPosition(ActionManager):
                 pos_tgt,
             )
             self.boot_delay.sub_(1).clamp_min_(0)
+
+        if not torch.isfinite(pos_tgt).all():
+            bad = (~torch.isfinite(pos_tgt)).any(dim=-1).nonzero(as_tuple=False).squeeze(-1)
+            sample = bad[:16].detach().cpu().tolist()
+            logging.error(
+                "[DEBUG][action] non-finite joint target detected: "
+                f"timestamp={int(getattr(self.env, 'timestamp', -1))} "
+                f"substep={int(substep)} num_bad_envs={int(bad.numel())} sample_env_ids={sample}"
+            )
+            raise FloatingPointError(
+                f"Non-finite joint target: num_envs={int(bad.numel())}, sample_env_ids={sample}"
+            )
 
         # Write to simulator -----------------------------------------------
         self.asset.set_joint_position_target(pos_tgt)

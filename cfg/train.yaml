@@ -40,6 +40,7 @@ wandb:
   include_env_extra: true
   include_stats_ema: false
   include_live_reward: true
+  console_log_enabled: true
   upload_checkpoints: false
   tags: []
   id: null

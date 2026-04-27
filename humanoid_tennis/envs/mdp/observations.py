@@ -3,6 +3,8 @@ import numpy as np
 import abc
 import einops
 import inspect
+import logging
+import os
 from typing import Tuple, TYPE_CHECKING, Callable
 
 import humanoid_tennis
@@ -454,17 +456,227 @@ class body_height(Observation):
         super().__init__(env)
         self.asset: Articulation = self.env.scene["robot"]
         self.body_ids, self.body_names = self.asset.find_bodies(body_names)
+        self._nonfinite_debug_emitted = False
+        self._nonfinite_dump_dir = os.environ.get("HT_NONFINITE_DUMP_DIR", "").strip()
+
+    def _safe_tensor_sample(self, tensor: torch.Tensor, env_id: int, max_items: int = 16):
+        if tensor is None:
+            return None
+        if not isinstance(tensor, torch.Tensor):
+            return None
+        if tensor.ndim == 0:
+            return float(tensor.detach().cpu().item())
+        if tensor.shape[0] <= env_id:
+            return None
+        value = tensor[env_id].detach().float().cpu().reshape(-1)
+        if value.numel() > max_items:
+            value = value[:max_items]
+        return value.tolist()
+
+    def _emit_nonfinite_debug(self, heights: torch.Tensor, bad_env: torch.Tensor):
+        if self._nonfinite_debug_emitted:
+            return
+        self._nonfinite_debug_emitted = True
+
+        sample_env_ids = bad_env[:4].detach().cpu().tolist()
+        lines = []
+        lines.append(
+            "[DEBUG][body_height] non-finite detected: "
+            f"num_bad_envs={int(bad_env.numel())}, sample_env_ids={sample_env_ids}, "
+            f"timestamp={int(getattr(self.env, 'timestamp', -1))}"
+        )
+        if hasattr(self.env, "episode_length_buf"):
+            episode_len = self.env.episode_length_buf[bad_env[:16]].detach().cpu().tolist()
+            lines.append(f"[DEBUG][body_height] episode_length(sample)={episode_len}")
+
+        body_names = [str(n) for n in self.body_names]
+        for env_id in sample_env_ids:
+            env_i = int(env_id)
+            row = heights[env_i].detach()
+            bad_cols = (~torch.isfinite(row)).nonzero(as_tuple=False).squeeze(-1).detach().cpu().tolist()
+            bad_body_names = [body_names[int(c)] for c in bad_cols if int(c) < len(body_names)]
+            lines.append(
+                f"[DEBUG][body_height][env={env_i}] bad_cols={bad_cols} bad_body_names={bad_body_names}"
+            )
+
+            # Root states.
+            root_pos = self._safe_tensor_sample(getattr(self.asset.data, "root_link_pos_w", None), env_i, 3)
+            root_quat = self._safe_tensor_sample(getattr(self.asset.data, "root_link_quat_w", None), env_i, 4)
+            root_lin = self._safe_tensor_sample(getattr(self.asset.data, "root_link_lin_vel_w", None), env_i, 3)
+            root_ang = self._safe_tensor_sample(getattr(self.asset.data, "root_link_ang_vel_w", None), env_i, 3)
+            lines.append(
+                f"[DEBUG][body_height][env={env_i}] "
+                f"root_pos={root_pos} root_quat={root_quat} root_lin_vel={root_lin} root_ang_vel={root_ang}"
+            )
+
+            # Joint states.
+            joint_pos = getattr(self.asset.data, "joint_pos", None)
+            joint_vel = getattr(self.asset.data, "joint_vel", None)
+            if isinstance(joint_pos, torch.Tensor) and joint_pos.shape[0] > env_i:
+                jp = joint_pos[env_i]
+                jv = joint_vel[env_i] if isinstance(joint_vel, torch.Tensor) and joint_vel.shape[0] > env_i else None
+                lines.append(
+                    f"[DEBUG][body_height][env={env_i}] "
+                    f"joint_pos_finite={bool(torch.isfinite(jp).all().item())} "
+                    f"joint_vel_finite={bool(torch.isfinite(jv).all().item()) if jv is not None else None} "
+                    f"joint_pos_absmax={float(jp.abs().max().detach().cpu().item()):.6f} "
+                    f"joint_vel_absmax="
+                    f"{(float(jv.abs().max().detach().cpu().item()) if jv is not None else float('nan')):.6f}"
+                )
+
+            # Selected body z values and finite mask.
+            z_row = row.float().cpu()
+            z_preview = z_row[: min(12, z_row.numel())].tolist()
+            z_finite_preview = torch.isfinite(z_row[: min(12, z_row.numel())]).tolist()
+            lines.append(
+                f"[DEBUG][body_height][env={env_i}] z_preview={z_preview} z_isfinite_preview={z_finite_preview}"
+            )
+
+            # Simulation buffers if available.
+            sim_data = getattr(self.env, "sim", None)
+            sim_data = getattr(sim_data, "data", None)
+            if sim_data is not None:
+                nacon = getattr(sim_data, "nacon", None)
+                nacon_i = 0
+                if isinstance(nacon, torch.Tensor):
+                    flat_nacon = nacon.reshape(-1)
+                    if flat_nacon.numel() > env_i:
+                        nacon_i = int(flat_nacon[env_i].detach().cpu().item())
+                        lines.append(f"[DEBUG][body_height][env={env_i}] nacon={nacon_i}")
+                qpos = getattr(sim_data, "qpos", None)
+                qvel = getattr(sim_data, "qvel", None)
+                if isinstance(qpos, torch.Tensor) and qpos.ndim == 2 and qpos.shape[0] > env_i:
+                    qpos_i = qpos[env_i]
+                    lines.append(
+                        f"[DEBUG][body_height][env={env_i}] qpos_finite={bool(torch.isfinite(qpos_i).all().item())} "
+                        f"qpos_absmax={float(qpos_i.abs().max().detach().cpu().item()):.6f}"
+                    )
+                if isinstance(qvel, torch.Tensor) and qvel.ndim == 2 and qvel.shape[0] > env_i:
+                    qvel_i = qvel[env_i]
+                    lines.append(
+                        f"[DEBUG][body_height][env={env_i}] qvel_finite={bool(torch.isfinite(qvel_i).all().item())} "
+                        f"qvel_absmax={float(qvel_i.abs().max().detach().cpu().item()):.6f}"
+                    )
+
+                # Contact-pair diagnostics for this env.
+                contact = getattr(sim_data, "contact", None)
+                if contact is not None and nacon_i > 0:
+                    geom = getattr(contact, "geom", None)
+                    worldid = getattr(contact, "worldid", None)
+                    dist = getattr(contact, "dist", None)
+                    if isinstance(geom, torch.Tensor) and isinstance(worldid, torch.Tensor):
+                        geom_i = geom[:nacon_i]
+                        world_i = worldid[:nacon_i].to(torch.long)
+                        env_mask = world_i == env_i
+                        if env_mask.any():
+                            pair_rows = geom_i[env_mask]
+                            max_pairs = min(12, int(pair_rows.shape[0]))
+                            pair_rows = pair_rows[:max_pairs]
+                            pair_ids = [[int(a), int(b)] for a, b in pair_rows.detach().cpu().tolist()]
+                            lines.append(
+                                f"[DEBUG][body_height][env={env_i}] contact_pairs(count={int(env_mask.sum().item())}, "
+                                f"show={max_pairs})={pair_ids}"
+                            )
+
+                            # Highlight whether racket/body collision geoms are involved.
+                            cmd = getattr(self.env, "command_manager", None)
+                            racket_ids = None
+                            body_ids = None
+                            if cmd is not None:
+                                racket_ids = getattr(cmd, "racket_contact_geom_ids", None)
+                                body_ids = getattr(cmd, "racket_body_contact_geom_ids", None)
+                            if isinstance(racket_ids, torch.Tensor) and racket_ids.numel() > 0:
+                                p0 = pair_rows[:, 0]
+                                p1 = pair_rows[:, 1]
+                                racket_hit = torch.isin(p0, racket_ids) | torch.isin(p1, racket_ids)
+                                lines.append(
+                                    f"[DEBUG][body_height][env={env_i}] contact_involves_racket="
+                                    f"{bool(racket_hit.any().item())}"
+                                )
+                                if isinstance(body_ids, torch.Tensor) and body_ids.numel() > 0:
+                                    b0 = torch.isin(p0, body_ids)
+                                    b1 = torch.isin(p1, body_ids)
+                                    rb_hit = (torch.isin(p0, racket_ids) & b1) | (torch.isin(p1, racket_ids) & b0)
+                                    lines.append(
+                                        f"[DEBUG][body_height][env={env_i}] contact_is_racket_body_pair="
+                                        f"{bool(rb_hit.any().item())}"
+                                    )
+
+                            if isinstance(dist, torch.Tensor):
+                                dist_i = dist[:nacon_i][env_mask][:max_pairs].detach().cpu().tolist()
+                                lines.append(
+                                    f"[DEBUG][body_height][env={env_i}] contact_dist_preview={dist_i}"
+                                )
+
+            # High-level command state hints (if available).
+            cmd = getattr(self.env, "command_manager", None)
+            if cmd is not None:
+                for state_key in (
+                    "racket_body_contact",
+                    "racket_body_contact_event",
+                    "fail_racket_body",
+                    "has_hit",
+                    "success_done",
+                ):
+                    v = getattr(cmd, state_key, None)
+                    if isinstance(v, torch.Tensor) and v.ndim >= 1 and v.shape[0] > env_i:
+                        val = bool(v[env_i].detach().cpu().item())
+                        lines.append(f"[DEBUG][body_height][env={env_i}] {state_key}={val}")
+
+        logging.error("\n".join(lines))
+
+        if self._nonfinite_dump_dir:
+            try:
+                os.makedirs(self._nonfinite_dump_dir, exist_ok=True)
+                dump = {
+                    "bad_env": bad_env.detach().cpu(),
+                    "sample_env_ids": sample_env_ids,
+                    "timestamp": int(getattr(self.env, "timestamp", -1)),
+                    "heights": heights[bad_env[:16]].detach().cpu(),
+                }
+                env_sel = bad_env[:16]
+                for k in (
+                    "root_link_pos_w",
+                    "root_link_quat_w",
+                    "root_link_lin_vel_w",
+                    "root_link_ang_vel_w",
+                    "joint_pos",
+                    "joint_vel",
+                ):
+                    v = getattr(self.asset.data, k, None)
+                    if isinstance(v, torch.Tensor) and v.shape[0] > 0:
+                        dump[k] = v[env_sel].detach().cpu()
+                dump_path = os.path.join(
+                    self._nonfinite_dump_dir,
+                    f"body_height_nonfinite_rank{humanoid_tennis.get_local_rank()}_t{int(getattr(self.env, 'timestamp', -1))}.pt",
+                )
+                torch.save(dump, dump_path)
+                logging.error(f"[DEBUG][body_height] dumped non-finite snapshot to: {dump_path}")
+            except Exception as exc:
+                logging.error(f"[DEBUG][body_height] failed to dump snapshot: {exc}")
     
     def compute(self) -> torch.Tensor:
         heights = self.asset.data.body_link_pos_w[:, self.body_ids, 2].reshape(
             self.num_envs, -1
         )
-        if not torch.isfinite(heights).all():
-            bad_env = (~torch.isfinite(heights)).any(dim=-1).nonzero(as_tuple=False).squeeze(-1)
+        skip_mask = getattr(self.env, "_obs_skip_mask", None)
+        if isinstance(skip_mask, torch.Tensor) and skip_mask.shape[0] == self.num_envs:
+            skip_mask = skip_mask.to(device=heights.device, dtype=torch.bool)
+        else:
+            skip_mask = torch.zeros((self.num_envs,), dtype=torch.bool, device=heights.device)
+
+        nonfinite = ~torch.isfinite(heights)
+        active_nonfinite = nonfinite & (~skip_mask).unsqueeze(-1)
+        if active_nonfinite.any():
+            bad_env = active_nonfinite.any(dim=-1).nonzero(as_tuple=False).squeeze(-1)
+            self._emit_nonfinite_debug(heights, bad_env)
             raise FloatingPointError(
                 f"Non-finite body_height observation: num_envs={int(bad_env.numel())}, "
                 f"sample_env_ids={bad_env[:16].detach().cpu().tolist()}"
             )
+        if skip_mask.any():
+            heights = heights.clone()
+            heights[skip_mask] = 0.0
         return heights
 
     def symmetry_transforms(self):

@@ -53,6 +53,12 @@ class HighLevelTennisRuntimeFlowMixin:
             stroke_mismatch = (target_forehand & (~used_forehand)) | (target_backhand & used_forehand)
             self.hit_stroke_mode_match_event[hit_mask] = stroke_match
             self.hit_stroke_mode_mismatch_event[hit_mask] = stroke_mismatch
+            if stroke_mismatch.any():
+                # Stroke-side mismatch should never be counted as a valid scoring hit.
+                hit_env_ids = hit_mask.nonzero(as_tuple=False).squeeze(-1)
+                mismatch_env_ids = hit_env_ids[stroke_mismatch]
+                self.fail_style[mismatch_env_ids] = True
+                self.stroke_style_violation_event[mismatch_env_ids] = True
 
             first_hit = hit_mask & (self.first_hit_step >= self.max_task_steps)
             if first_hit.any():
@@ -201,7 +207,8 @@ class HighLevelTennisRuntimeFlowMixin:
             | (ball_pos_l[:, 0].abs() > self.court_x_limit + 2.0)
             | (ball_pos_l[:, 1].abs() > self.court_y_limit + 4.0)
         )
-        self.success[:] = self.has_bounce & self.bounce_in
+        # Style-invalid rallies (e.g., forehand target hit with backhand face) cannot score.
+        self.success[:] = self.has_bounce & self.bounce_in & (~self.fail_style)
         self.fail_out |= (~self.success) & fail_out_candidate
 
         success_done = self.success

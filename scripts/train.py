@@ -123,6 +123,7 @@ def main(cfg: DictConfig):
         include_env_extra = bool(cfg.wandb.get("include_env_extra", True))
         include_stats_ema = bool(cfg.wandb.get("include_stats_ema", False))
         include_live_reward = bool(cfg.wandb.get("include_live_reward", True))
+        console_log_enabled = bool(cfg.wandb.get("console_log_enabled", True))
         upload_checkpoints = bool(cfg.wandb.get("upload_checkpoints", False))
         checkpoint_dir = os.path.join(os.getcwd(), "checkpoints")
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -287,7 +288,13 @@ def main(cfg: DictConfig):
                 save(policy, f"checkpoint_{i}")
 
             run.log(info, step=i)
-            print(OmegaConf.to_yaml({k: v for k, v in info.items() if isinstance(v, (float, int))}))
+            if console_log_enabled:
+                console_info = {
+                    k: v
+                    for k, v in info.items()
+                    if isinstance(v, (float, int)) and not str(k).startswith("highlevel/reward_live/")
+                }
+                print(OmegaConf.to_yaml(console_info))
     
     if aa.is_main_process():
         if train_recorder is not None:

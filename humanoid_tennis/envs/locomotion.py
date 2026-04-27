@@ -182,7 +182,8 @@ class SimpleEnv(_Env):
         njmax = int(self.cfg.sim.get("njmax", 2000))
         mujoco_iterations = int(self.cfg.sim.get("mujoco_iterations", 20))
         mujoco_ls_iterations = int(self.cfg.sim.get("mujoco_ls_iterations", 40))
-        default_ccd_iterations = 96 if is_tennis_ball_task else 50
+        # Tennis scenes (ball/racket/net) require more CCD sweeps than generic tasks.
+        default_ccd_iterations = 128 if is_tennis_ball_task else 50
         mujoco_ccd_iterations = int(self.cfg.sim.get("mujoco_ccd_iterations", default_ccd_iterations))
         mujoco_multiccd = bool(self.cfg.sim.get("mujoco_multiccd", False))
         # Guard against OOM in large-batch training (e.g., 2k~4k envs/GPU):
@@ -191,9 +192,10 @@ class SimpleEnv(_Env):
         if int(self.cfg.num_envs) >= 4096:
             capped_nconmax = min(nconmax, int(self.cfg.sim.get("mujoco_nconmax_cap", 192)))
             capped_njmax = min(njmax, int(self.cfg.sim.get("mujoco_njmax_cap", 900)))
-            capped_ccd = min(mujoco_ccd_iterations, int(self.cfg.sim.get("mujoco_ccd_iterations_cap", 96)))
+            ccd_cap_default = 128 if is_tennis_ball_task else 96
+            capped_ccd = min(mujoco_ccd_iterations, int(self.cfg.sim.get("mujoco_ccd_iterations_cap", ccd_cap_default)))
             if is_tennis_ball_task:
-                capped_ccd = max(capped_ccd, int(self.cfg.sim.get("mujoco_ccd_iterations_floor", 96)))
+                capped_ccd = max(capped_ccd, int(self.cfg.sim.get("mujoco_ccd_iterations_floor", 128)))
 
             solver_budget = int(self.cfg.sim.get("mujoco_solver_budget", 160_000_000))
             solver_denom = max(1, 10 + 2 * capped_ccd)

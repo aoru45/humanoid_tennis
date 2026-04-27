@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import hydra
 import inspect
+import logging
 import time
 from typing import NamedTuple, Dict, Optional
 
@@ -386,6 +387,161 @@ class _Env(EnvBase):
         self.lookat_env_i = 0
 
         self.extra = {}
+        # Optional per-step mask to skip fragile observations on envs that are
+        # already marked done in the same frame.
+        self._obs_skip_mask = None
+
+    def _safe_geom_name(self, geom_id: int) -> str:
+        try:
+            name = self.sim.mj_model.geom(int(geom_id)).name
+            if isinstance(name, str) and len(name) > 0:
+                return name
+        except Exception:
+            pass
+        return f"geom[{int(geom_id)}]"
+
+    def _safe_body_name(self, body_id: int) -> str:
+        try:
+            name = self.sim.mj_model.body(int(body_id)).name
+            if isinstance(name, str) and len(name) > 0:
+                return name
+        except Exception:
+            pass
+        return f"body[{int(body_id)}]"
+
+    def _collect_nonfinite_env_ids(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        bad_mask = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        for tensor in tensors:
+            if not isinstance(tensor, torch.Tensor):
+                continue
+            if tensor.ndim == 0 or tensor.shape[0] != self.num_envs:
+                continue
+            if tensor.ndim == 1:
+                bad_mask |= ~torch.isfinite(tensor)
+            else:
+                flat = tensor.reshape(self.num_envs, -1)
+                bad_mask |= (~torch.isfinite(flat)).any(dim=-1)
+        return bad_mask.nonzero(as_tuple=False).squeeze(-1)
+
+    def _emit_nonfinite_state_debug(self, stage: str, substep: int | None, bad_env: torch.Tensor) -> None:
+        sample_env_ids = bad_env[:8].detach().cpu().tolist()
+        lines = [
+            "[DEBUG][sim_nonfinite] detected.",
+            f"[DEBUG][sim_nonfinite] stage={stage} substep={substep} "
+            f"timestamp={int(self.timestamp)} num_bad_envs={int(bad_env.numel())} sample_env_ids={sample_env_ids}",
+        ]
+        if bad_env.numel() > 0:
+            env_sel = bad_env[:4]
+            try:
+                ep = self.episode_length_buf[env_sel].detach().cpu().tolist()
+                lines.append(f"[DEBUG][sim_nonfinite] episode_length(sample)={ep}")
+            except Exception:
+                pass
+
+            robot = self.scene["robot"]
+            root_pos = getattr(robot.data, "root_link_pos_w", None)
+            root_quat = getattr(robot.data, "root_link_quat_w", None)
+            root_lin_vel = getattr(robot.data, "root_link_lin_vel_w", None)
+            root_ang_vel = getattr(robot.data, "root_link_ang_vel_w", None)
+            joint_pos = getattr(robot.data, "joint_pos", None)
+            joint_vel = getattr(robot.data, "joint_vel", None)
+
+            for env_i in env_sel.detach().cpu().tolist():
+                lines.append(f"[DEBUG][sim_nonfinite][env={env_i}]")
+                for k, t in (
+                    ("root_pos", root_pos),
+                    ("root_quat", root_quat),
+                    ("root_lin_vel", root_lin_vel),
+                    ("root_ang_vel", root_ang_vel),
+                ):
+                    if isinstance(t, torch.Tensor) and t.shape[0] > env_i:
+                        v = t[env_i].detach().cpu().tolist()
+                        finite = bool(torch.isfinite(t[env_i]).all().item())
+                        lines.append(f"[DEBUG][sim_nonfinite][env={env_i}] {k}={v} finite={finite}")
+                if isinstance(joint_pos, torch.Tensor) and joint_pos.shape[0] > env_i:
+                    jp = joint_pos[env_i]
+                    lines.append(
+                        f"[DEBUG][sim_nonfinite][env={env_i}] joint_pos_finite={bool(torch.isfinite(jp).all().item())} "
+                        f"joint_pos_absmax={float(jp.abs().max().detach().cpu().item()) if torch.isfinite(jp).any() else float('nan')}"
+                    )
+                if isinstance(joint_vel, torch.Tensor) and joint_vel.shape[0] > env_i:
+                    jv = joint_vel[env_i]
+                    lines.append(
+                        f"[DEBUG][sim_nonfinite][env={env_i}] joint_vel_finite={bool(torch.isfinite(jv).all().item())} "
+                        f"joint_vel_absmax={float(jv.abs().max().detach().cpu().item()) if torch.isfinite(jv).any() else float('nan')}"
+                    )
+
+                cmd = getattr(self, "command_manager", None)
+                for state_key in (
+                    "has_hit",
+                    "has_bounce",
+                    "finished",
+                    "success_done",
+                    "fail_miss",
+                    "fail_net",
+                    "fail_out",
+                    "fail_style",
+                    "fail_racket_body",
+                    "racket_body_contact",
+                    "racket_body_contact_event",
+                ):
+                    v = getattr(cmd, state_key, None)
+                    if isinstance(v, torch.Tensor) and v.ndim >= 1 and v.shape[0] > env_i:
+                        lines.append(f"[DEBUG][sim_nonfinite][env={env_i}] {state_key}={bool(v[env_i].detach().cpu().item())}")
+
+            try:
+                nacon_t = self.sim.data.nacon.reshape(-1)
+                nacon = int(nacon_t[0].item()) if nacon_t.numel() > 0 else 0
+                lines.append(f"[DEBUG][sim_nonfinite] nacon={nacon}")
+                if nacon > 0:
+                    geom = self.sim.data.contact.geom[:nacon].to(torch.long)
+                    world = self.sim.data.contact.worldid[:nacon].to(torch.long)
+                    dist = self.sim.data.contact.dist[:nacon]
+                    for env_i in env_sel.detach().cpu().tolist():
+                        env_mask = world == int(env_i)
+                        count = int(env_mask.sum().item())
+                        lines.append(f"[DEBUG][sim_nonfinite][env={env_i}] contact_count={count}")
+                        if count <= 0:
+                            continue
+                        idx = env_mask.nonzero(as_tuple=False).squeeze(-1)[:12]
+                        for j in idx.detach().cpu().tolist():
+                            g0 = int(geom[j, 0].item())
+                            g1 = int(geom[j, 1].item())
+                            g0_name = self._safe_geom_name(g0)
+                            g1_name = self._safe_geom_name(g1)
+                            body_id0 = int(self.sim.mj_model.geom_bodyid[g0]) if g0 >= 0 else -1
+                            body_id1 = int(self.sim.mj_model.geom_bodyid[g1]) if g1 >= 0 else -1
+                            b0_name = self._safe_body_name(body_id0) if body_id0 >= 0 else "None"
+                            b1_name = self._safe_body_name(body_id1) if body_id1 >= 0 else "None"
+                            d = float(dist[j].detach().cpu().item())
+                            lines.append(
+                                f"[DEBUG][sim_nonfinite][env={env_i}] contact[{j}] "
+                                f"{g0_name}({b0_name}) <-> {g1_name}({b1_name}) dist={d:.6f}"
+                            )
+            except Exception as exc:
+                lines.append(f"[DEBUG][sim_nonfinite] failed to inspect contacts: {exc}")
+
+        logging.error("\n".join(lines))
+
+    def _check_sim_state_finite(self, stage: str, substep: int | None = None) -> None:
+        robot = self.scene["robot"]
+        bad_env = self._collect_nonfinite_env_ids(
+            [
+                robot.data.root_link_pos_w,
+                robot.data.root_link_quat_w,
+                robot.data.root_link_lin_vel_w,
+                robot.data.root_link_ang_vel_w,
+                robot.data.joint_pos,
+                robot.data.joint_vel,
+            ]
+        )
+        if bad_env.numel() > 0:
+            self._emit_nonfinite_state_debug(stage=stage, substep=substep, bad_env=bad_env)
+            sample = bad_env[:16].detach().cpu().tolist()
+            raise FloatingPointError(
+                f"Non-finite simulator state at stage={stage}, substep={substep}: "
+                f"num_envs={int(bad_env.numel())}, sample_env_ids={sample}"
+            )
 
     @property
     def action_dim(self) -> int:
@@ -527,6 +683,7 @@ class _Env(EnvBase):
             # do post step for obs
             for callback in self._post_step_callbacks:
                 callback(substep)
+            self._check_sim_state_finite(stage="post_substep", substep=substep)
 
     @torch.no_grad()
     def _step(self, tensordict: TensorDictBase) -> TensorDictBase:
@@ -534,6 +691,7 @@ class _Env(EnvBase):
         self._update_sim(tensordict)
         self.sim.forward()
         self.sim.sense()
+        self._check_sim_state_finite(stage="post_forward", substep=None)
 
         ## do command update before reward computation
         self.command_manager.before_update()
@@ -548,18 +706,25 @@ class _Env(EnvBase):
         ## update command
         self.command_manager.update()
 
-        # update observation
-        self._compute_observation(tensordict)
-
-        # update termination
+        # Compute termination before observation so catastrophic states that are
+        # already marked done do not crash observation computation.
         terminated = self._compute_termination()
         terminated = terminated & (self.episode_length_buf > 5).unsqueeze(1) # do not terminate in the first 5 steps
         truncated = (self.episode_length_buf >= self.max_episode_length).unsqueeze(1)
         if hasattr(self.command_manager, "finished"):
             truncated = truncated | self.command_manager.finished.unsqueeze(1)
+        done = terminated | truncated
+
+        # update observation
+        self._obs_skip_mask = done.squeeze(-1)
+        try:
+            self._compute_observation(tensordict)
+        finally:
+            self._obs_skip_mask = None
+
         tensordict.set("terminated", terminated)
         tensordict.set("truncated", truncated)
-        tensordict.set("done", terminated | truncated)
+        tensordict.set("done", done)
         self.discount.fill_(1.0)
         tensordict.set("discount", self.discount.clone())
         tensordict["stats"] = self.stats.clone()
