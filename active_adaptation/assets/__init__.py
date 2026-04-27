@@ -6,7 +6,12 @@ from .humanoid import (
     G1_COL_FULL_SELF_RACKET,
     G1_COL_FULL_SELF_RACKET_NOSELF,
 )
-from .tennis import get_tennis_ball_cfg, get_tennis_court_cfg
+from .tennis import (
+    TERRAIN_BALL_BOUNCE_FRICTION,
+    TERRAIN_BALL_BOUNCE_SOLREF,
+    get_tennis_ball_cfg,
+    get_tennis_court_cfg,
+)
 
 ASSET_PATH = os.path.dirname(__file__)
 
@@ -33,4 +38,6 @@ __all__ = [
     "get_robot_cfg",
     "get_tennis_ball_cfg",
     "get_tennis_court_cfg",
+    "TERRAIN_BALL_BOUNCE_FRICTION",
+    "TERRAIN_BALL_BOUNCE_SOLREF",
 ]

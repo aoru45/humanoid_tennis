@@ -20,6 +20,6 @@ algo:
   pulse_logvar_max: 2
   highlevel_wrist_residual_enabled: true
   highlevel_wrist_joint_patterns: [right_wrist_.*_joint]
-  highlevel_wrist_action_scale: 1.0
+  highlevel_wrist_action_scale: 0.6
 
 total_frames: 5_000_000_000

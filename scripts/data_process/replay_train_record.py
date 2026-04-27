@@ -547,6 +547,10 @@ def main():
     if not record_path.exists():
         raise FileNotFoundError(f"Record file not found: {record_path}")
     print(f"[INFO] Replay record: {record_path}")
+    print(
+        "[INFO] Replay mode writes recorded qpos/qvel directly; "
+        "training-time termination/reset logic is not executed in this script."
+    )
 
     if args.speed <= 0:
         raise ValueError("--speed must be > 0.")

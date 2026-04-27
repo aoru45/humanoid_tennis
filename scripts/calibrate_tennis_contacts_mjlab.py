@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+"""
+Tennis contact calibration script (MuJoCo-only).
+
+Standards used by default:
+- Ball-ground rebound: ITF Rules of Tennis / ITF Ball Approval Procedures
+  (drop from 2.54 m; default type2 range 1.35-1.47 m).
+- Ball-racket targets: Rod Cross / Tennis Warehouse University literature:
+  clamped normal COR e_y ~ 0.75, hand-held apparent COR e_A ~ 0.40,
+  and contact dwell time near 5 ms (target band 3-7 ms).
+"""
+
 import argparse
 import math
+import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -63,9 +75,12 @@ class BounceMetrics:
 @dataclass
 class BounceCandidate:
     ball_solref2: float
-    court_solref2: float
-    drop_h2_m: float
+    ground_solref2: float
+    drop_rebound_h_m: float
     drop_e_eff: float
+    itf_rebound_min_m: float
+    itf_rebound_max_m: float
+    itf_ball_type: str
     launch: BounceMetrics
     score: float
 
@@ -103,6 +118,18 @@ class RacketSim:
     ball_qpos: int
     ball_dof: int
     rack_dof: int | None
+
+
+def _itf_rebound_range_m(ball_type: str) -> tuple[float, float]:
+    key = str(ball_type).strip().lower()
+    # ITF Rules of Tennis / Ball Approval Procedures (drop from 2.54 m onto rigid base).
+    if key == "type1":
+        return 1.38, 1.51
+    if key in ("type2", "type3"):
+        return 1.35, 1.47
+    if key in ("high_altitude", "high-altitude", "highaltitude"):
+        return 1.22, 1.35
+    raise ValueError(f"Unsupported itf_ball_type: {ball_type}")
 
 
 def _repo_root() -> Path:
@@ -153,6 +180,44 @@ def _parse_floats(s: str, n: int) -> list[float]:
     return vals
 
 
+def _parse_tuple_literal(rhs: str, n: int, *, key: str) -> list[float]:
+    m = re.search(r"\(([^)]*)\)", rhs)
+    if m is None:
+        raise ValueError(f"Cannot parse tuple literal for {key}: {rhs}")
+    vals = [float(x.strip()) for x in m.group(1).split(",") if x.strip()]
+    if len(vals) != n:
+        raise ValueError(f"Expected {n} values for {key}, got {vals}")
+    return vals
+
+
+def _read_terrain_constants(tennis_py: Path) -> tuple[list[float], list[float]]:
+    text = tennis_py.read_text(encoding="utf-8")
+    m_fric = re.search(r"^TERRAIN_BALL_BOUNCE_FRICTION\s*=\s*(.+)$", text, flags=re.MULTILINE)
+    m_solref = re.search(r"^TERRAIN_BALL_BOUNCE_SOLREF\s*=\s*(.+)$", text, flags=re.MULTILINE)
+    if m_fric is None or m_solref is None:
+        raise KeyError(f"Cannot find TERRAIN_BALL_BOUNCE_* in {tennis_py}")
+    fric = _parse_tuple_literal(m_fric.group(1), 3, key="TERRAIN_BALL_BOUNCE_FRICTION")
+    solref = _parse_tuple_literal(m_solref.group(1), 2, key="TERRAIN_BALL_BOUNCE_SOLREF")
+    return fric, solref
+
+
+def _update_terrain_constants(tennis_py: Path, *, friction: tuple[float, float, float], solref: tuple[float, float]) -> None:
+    text = tennis_py.read_text(encoding="utf-8")
+    text_new = re.sub(
+        r"^TERRAIN_BALL_BOUNCE_FRICTION\s*=.*$",
+        f"TERRAIN_BALL_BOUNCE_FRICTION = ({friction[0]:.3f}, {friction[1]:.3f}, {friction[2]:.3f})",
+        text,
+        flags=re.MULTILINE,
+    )
+    text_new = re.sub(
+        r"^TERRAIN_BALL_BOUNCE_SOLREF\s*=.*$",
+        f"TERRAIN_BALL_BOUNCE_SOLREF = ({solref[0]:.3f}, {solref[1]:.3f})",
+        text_new,
+        flags=re.MULTILINE,
+    )
+    tennis_py.write_text(text_new, encoding="utf-8")
+
+
 def _apply_training_sim_defaults(args: argparse.Namespace) -> None:
     from omegaconf import OmegaConf
 
@@ -182,35 +247,33 @@ class MujocoBounceCalibrator:
     ) -> None:
         root = _repo_root()
         ball_attr = _read_xml_geom_attrs(root / "active_adaptation/assets/tennis/tennis_ball.xml", "tennis_ball_geom")
-        court_attr = _read_xml_geom_attrs(root / "active_adaptation/assets/tennis/tennis_court.xml", "tennis_court_ball_collision")
+        terrain_friction, terrain_solref = _read_terrain_constants(root / "active_adaptation/assets/tennis.py")
 
         b_mu = _parse_floats(ball_attr.get("friction", "0.45 0.05 0.02"), 3)
-        c_mu = _parse_floats(court_attr.get("friction", "0.85 0.02 0.01"), 3)
         b_sr = _parse_floats(ball_attr.get("solref", "0.010 0.050"), 2)
-        c_sr = _parse_floats(court_attr.get("solref", "0.010 0.070"), 2)
         b_si = _parse_floats(ball_attr.get("solimp", "0.95 0.995 0.001 0.5 2"), 5)
-        c_si = _parse_floats(court_attr.get("solimp", "0.95 0.995 0.001 0.5 2"), 5)
+        c_mu = terrain_friction
+        c_sr = terrain_solref
+        c_si = [0.95, 0.995, 0.001, 0.5, 2.0]
 
         ball_radius = float(ball_attr.get("size", "0.0335"))
         ball_mass = float(ball_attr.get("mass", "0.0577"))
-        court_pos = _parse_floats(court_attr.get("pos", "0 0 -0.08"), 3)
-        court_size = _parse_floats(court_attr.get("size", "11.88 10.97 0.08"), 3)
-        self.contact_center_z = float(court_pos[2] + court_size[2] + ball_radius)
+        self.contact_center_z = float(ball_radius)
 
         xml = f"""
 <mujoco model="tennis_bounce_ident_fast">
   <size nconmax="{int(nconmax)}" njmax="{int(njmax)}"/>
   <option timestep="{float(physics_dt):.8f}" gravity="0 0 -9.81"/>
   <worldbody>
-    <geom name="court" type="box"
-      pos="{court_pos[0]} {court_pos[1]} {court_pos[2]}"
-      size="{court_size[0]} {court_size[1]} {court_size[2]}"
-      condim="{court_attr.get('condim', '3')}"
+    <geom name="ground" type="plane"
+      pos="0 0 0"
+      size="0 0 1"
+      condim="3"
       friction="{c_mu[0]} {c_mu[1]} {c_mu[2]}"
       solref="{c_sr[0]} {c_sr[1]}"
       solimp="{c_si[0]} {c_si[1]} {c_si[2]} {c_si[3]} {c_si[4]}"
-      contype="{court_attr.get('contype', '8')}"
-      conaffinity="{court_attr.get('conaffinity', '1')}" />
+      contype="1"
+      conaffinity="1" />
     <body name="ball" pos="0 -4 1.5">
       <freejoint/>
       <geom name="ball_geom" type="sphere"
@@ -219,8 +282,8 @@ class MujocoBounceCalibrator:
         friction="{b_mu[0]} {b_mu[1]} {b_mu[2]}"
         solref="{b_sr[0]} {b_sr[1]}"
         solimp="{b_si[0]} {b_si[1]} {b_si[2]} {b_si[3]} {b_si[4]}"
-        contype="{ball_attr.get('contype', '0')}"
-        conaffinity="{ball_attr.get('conaffinity', '14')}" />
+        contype="1"
+        conaffinity="1" />
     </body>
   </worldbody>
 </mujoco>
@@ -232,7 +295,7 @@ class MujocoBounceCalibrator:
             self.model.opt.ccd_iterations = int(ccd_iterations)
         self.data = mujoco.MjData(self.model)
         self.ball_gid = self.model.geom("ball_geom").id
-        self.court_gid = self.model.geom("court").id
+        self.ground_gid = self.model.geom("ground").id
         self.physics_dt = float(self.model.opt.timestep)
         self.gravity_z = float(self.model.opt.gravity[2])
         self.max_episode_steps = max(0, int(max_episode_steps))
@@ -253,9 +316,9 @@ class MujocoBounceCalibrator:
             steps = min(steps, self.max_episode_steps)
         return steps
 
-    def set_contact_solref2(self, ball_solref2: float, court_solref2: float) -> None:
+    def set_contact_solref2(self, ball_solref2: float, ground_solref2: float) -> None:
         self.model.geom_solref[self.ball_gid, 1] = float(ball_solref2)
-        self.model.geom_solref[self.court_gid, 1] = float(court_solref2)
+        self.model.geom_solref[self.ground_gid, 1] = float(ground_solref2)
 
     def _rollout_first_rebound(
         self,
@@ -375,10 +438,10 @@ class MujocoRacketCalibrator:
       {joint_xml}
       <geom
         name="racket"
-        type="ellipsoid"
+        type="box"
         pos="0 0 0"
         quat="0.7071068 -0.7071068 0 0"
-        size="0.115 0.185 {float(racket_half_thickness):.6f}"
+        size="0.25 0.25 {float(racket_half_thickness):.6f}"
         mass="{float(racket_mass):.6f}"
         condim="3"
         friction="{float(racket_mu):.6f} 0.05 0.01"
@@ -612,12 +675,18 @@ class MujocoRacketCalibrator:
 
 def run_bounce(args) -> BounceCandidate:
     ball_vals = _frange(args.ball_solref2_min, args.ball_solref2_max, args.ball_solref2_step)
-    court_vals = _frange(args.court_solref2_min, args.court_solref2_max, args.court_solref2_step)
-    pairs = [(float(b), float(c)) for b in ball_vals for c in court_vals]
+    ground_vals = _frange(args.ground_solref2_min, args.ground_solref2_max, args.ground_solref2_step)
+    pairs = [(float(b), float(g)) for b in ball_vals for g in ground_vals]
     if len(pairs) == 0:
         raise RuntimeError("No bounce candidates generated. Check search range and step.")
 
-    target_h2 = 1.41
+    itf_min_h, itf_max_h = _itf_rebound_range_m(args.itf_ball_type)
+    target_h2 = 0.5 * (itf_min_h + itf_max_h)
+    if args.itf_rebound_min_m is not None:
+        itf_min_h = float(args.itf_rebound_min_m)
+    if args.itf_rebound_max_m is not None:
+        itf_max_h = float(args.itf_rebound_max_m)
+    target_h2 = 0.5 * (itf_min_h + itf_max_h)
     cal = MujocoBounceCalibrator(
         physics_dt=args.physics_dt,
         iterations=args.iterations,
@@ -638,17 +707,17 @@ def run_bounce(args) -> BounceCandidate:
 
     def _evaluate_candidate(
         ball_solref2: float,
-        court_solref2: float,
+        ground_solref2: float,
         launch_cases: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
     ) -> BounceCandidate:
-        cal.set_contact_solref2(ball_solref2, court_solref2)
+        cal.set_contact_solref2(ball_solref2, ground_solref2)
 
         drop_pos = np.array([0.0, -4.0, cal.contact_center_z + float(args.drop_height_m)], dtype=np.float64)
         drop_vel = np.zeros((3,), dtype=np.float64)
         drop_ang = np.zeros((3,), dtype=np.float64)
-        _, _, h2 = cal._rollout_first_rebound(drop_pos, drop_vel, drop_ang, max_time_s=float(args.max_time_s))
-        h2 = float(0.0 if (not np.isfinite(h2)) else h2)
-        e_eff = float(np.sqrt(max(h2, 0.0) / max(float(args.drop_height_m), 1.0e-9)))
+        _, _, rebound_h = cal._rollout_first_rebound(drop_pos, drop_vel, drop_ang, max_time_s=float(args.max_time_s))
+        rebound_h = float(0.0 if (not np.isfinite(rebound_h)) else rebound_h)
+        e_eff = float(np.sqrt(max(rebound_h, 0.0) / max(float(args.drop_height_m), 1.0e-9)))
 
         h1_vals: list[float] = []
         no_impact = 0
@@ -680,11 +749,11 @@ def run_bounce(args) -> BounceCandidate:
         gt5_ratio = float(gt5) / float(max(valid, 1))
         gt7_ratio = float(gt7) / float(max(valid, 1))
 
-        score = abs(h2 - target_h2)
-        if h2 < 1.35:
-            score += 2.0 * (1.35 - h2)
-        if h2 > 1.47:
-            score += 2.0 * (h2 - 1.47)
+        score = abs(rebound_h - target_h2)
+        if rebound_h < itf_min_h:
+            score += 2.0 * (itf_min_h - rebound_h)
+        if rebound_h > itf_max_h:
+            score += 2.0 * (rebound_h - itf_max_h)
         score += 0.5 * gt5_ratio
         score += 1.0 * gt7_ratio
         score += 0.5 * bounce_ge3_ratio
@@ -692,9 +761,12 @@ def run_bounce(args) -> BounceCandidate:
 
         return BounceCandidate(
             ball_solref2=float(ball_solref2),
-            court_solref2=float(court_solref2),
-            drop_h2_m=float(h2),
+            ground_solref2=float(ground_solref2),
+            drop_rebound_h_m=float(rebound_h),
             drop_e_eff=float(e_eff),
+            itf_rebound_min_m=float(itf_min_h),
+            itf_rebound_max_m=float(itf_max_h),
+            itf_ball_type=str(args.itf_ball_type),
             launch=BounceMetrics(
                 samples=int(samples),
                 valid_first_bounce=int(valid),
@@ -728,13 +800,13 @@ def run_bounce(args) -> BounceCandidate:
             f"dt={cal.physics_dt:.6f} iterations={args.iterations} ls_iter={args.ls_iterations} ccd_iter={args.ccd_iterations}",
             flush=True,
         )
-        for i, (ball_solref2, court_solref2) in enumerate(search_pairs, start=1):
-            cand = _evaluate_candidate(ball_solref2, court_solref2, launch_cases)
+        for i, (ball_solref2, ground_solref2) in enumerate(search_pairs, start=1):
+            cand = _evaluate_candidate(ball_solref2, ground_solref2, launch_cases)
             out.append(cand)
             if args.verbose:
                 print(
-                    f"[CAND] ball={cand.ball_solref2:.3f} court={cand.court_solref2:.3f} "
-                    f"drop_h2={cand.drop_h2_m:.3f} e={cand.drop_e_eff:.3f} "
+                    f"[CAND] ball={cand.ball_solref2:.3f} ground={cand.ground_solref2:.3f} "
+                    f"drop_rebound_h={cand.drop_rebound_h_m:.3f} e={cand.drop_e_eff:.3f} "
                     f"h1_p99={cand.launch.h1_p99:.3f} gt5={cand.launch.h1_gt5_ratio:.3f} "
                     f"gt7={cand.launch.h1_gt7_ratio:.3f} score={cand.score:.4f}",
                     flush=True,
@@ -749,7 +821,11 @@ def run_bounce(args) -> BounceCandidate:
                 )
         return out
 
-    print(f"[INFO] bounce search candidates={len(pairs)} (backend=mujoco, launch_samples={args.launch_samples})")
+    print(
+        f"[INFO] bounce search candidates={len(pairs)} (backend=mujoco, launch_samples={args.launch_samples}) "
+        f"itf_ball_type={args.itf_ball_type} rebound_range_m=[{itf_min_h:.3f}, {itf_max_h:.3f}]",
+        flush=True,
+    )
     if args.prefilter_samples > 0 and args.prefilter_samples < args.launch_samples and args.prefilter_topk < len(pairs):
         print(f"[INFO] stage-1 coarse filter: samples={args.prefilter_samples}, keep_topk={args.prefilter_topk}")
         coarse = _evaluate_pairs(
@@ -759,7 +835,7 @@ def run_bounce(args) -> BounceCandidate:
             stage_name="coarse",
         )
         coarse.sort(key=lambda x: x.score)
-        fine_pairs = [(c.ball_solref2, c.court_solref2) for c in coarse[: args.prefilter_topk]]
+        fine_pairs = [(c.ball_solref2, c.ground_solref2) for c in coarse[: args.prefilter_topk]]
         if len(fine_pairs) == 0:
             fine_pairs = pairs
         print(f"[INFO] stage-2 fine eval candidates={len(fine_pairs)}")
@@ -783,16 +859,16 @@ def run_bounce(args) -> BounceCandidate:
     for i in range(topk):
         c = candidates[i]
         print(
-            f"#{i+1}: ball={c.ball_solref2:.3f}, court={c.court_solref2:.3f}, "
-            f"drop_h2={c.drop_h2_m:.3f}, e={c.drop_e_eff:.3f}, "
+            f"#{i+1}: ball={c.ball_solref2:.3f}, ground={c.ground_solref2:.3f}, "
+            f"drop_rebound_h={c.drop_rebound_h_m:.3f}, e={c.drop_e_eff:.3f}, "
             f"h1_p99={c.launch.h1_p99:.3f}, gt5={c.launch.h1_gt5_ratio:.3f}, gt7={c.launch.h1_gt7_ratio:.3f}, "
             f"no_impact={c.launch.no_impact_ratio:.3f}, bounce>=3={c.launch.bounce_ge3_ratio:.3f}, score={c.score:.4f}"
         )
 
     best = candidates[0]
     print(
-        f"[BEST][bounce] ball_solref2={best.ball_solref2:.6f} court_solref2={best.court_solref2:.6f} "
-        f"drop_h2={best.drop_h2_m:.6f} e={best.drop_e_eff:.6f}"
+        f"[BEST][bounce] ball_solref2={best.ball_solref2:.6f} ground_solref2={best.ground_solref2:.6f} "
+        f"drop_rebound_h={best.drop_rebound_h_m:.6f} e={best.drop_e_eff:.6f}"
     )
     return best
 
@@ -808,7 +884,17 @@ def run_racket(args, *, ball_solref2_for_racket: float | None = None) -> RacketC
         max_episode_steps=args.max_episode_steps,
     )
 
-    ball_solref2 = float(ball_solref2_for_racket if ball_solref2_for_racket is not None else args.racket_ball_solref2)
+    if ball_solref2_for_racket is not None:
+        ball_solref2 = float(ball_solref2_for_racket)
+    elif args.racket_ball_solref2 is not None:
+        ball_solref2 = float(args.racket_ball_solref2)
+    else:
+        root = _repo_root()
+        ball_attr = _read_xml_geom_attrs(root / "active_adaptation/assets/tennis/tennis_ball.xml", "tennis_ball_geom")
+        ball_solref2 = _parse_floats(ball_attr.get("solref", "0.010 0.050"), 2)[1]
+    speed_values = [float(v) for v in args.racket_incoming_speed_values]
+    if len(speed_values) == 0:
+        raise ValueError("racket_incoming_speed_values must contain at least one value.")
 
     candidates: list[RacketCandidate] = []
     total = (
@@ -818,6 +904,11 @@ def run_racket(args, *, ball_solref2_for_racket: float | None = None) -> RacketC
         * len(args.racket_joint_stiffness_values)
         * len(args.racket_joint_damping_values)
     )
+    print(
+        f"[INFO] racket search candidates={total} incoming_speed_values={speed_values} "
+        f"target_clamped_e_y~0.75 target_handheld_e_A~0.40 dwell_ms~5",
+        flush=True,
+    )
     done = 0
     t0 = time.perf_counter()
     for solref2 in args.racket_solref2_values:
@@ -825,17 +916,41 @@ def run_racket(args, *, ball_solref2_for_racket: float | None = None) -> RacketC
             for mass in args.racket_effective_mass_values:
                 for k in args.racket_joint_stiffness_values:
                     for d in args.racket_joint_damping_values:
-                        cand = cal.evaluate_candidate(
-                            ball_solref2=ball_solref2,
+                        speed_cands: list[RacketCandidate] = []
+                        for speed in speed_values:
+                            speed_cands.append(
+                                cal.evaluate_candidate(
+                                    ball_solref2=ball_solref2,
+                                    racket_solref2=float(solref2),
+                                    racket_mu=float(mu),
+                                    racket_half_thickness=float(args.racket_half_thickness),
+                                    racket_effective_mass=float(mass),
+                                    racket_joint_stiffness=float(k),
+                                    racket_joint_damping=float(d),
+                                    incoming_speed=float(speed),
+                                    incoming_tangent_speed=float(args.racket_incoming_tangent_speed),
+                                    max_time_s=float(args.racket_max_time_s),
+                                )
+                            )
+                        mean_e_y = float(np.nanmean([c.clamped_e_y for c in speed_cands]))
+                        mean_e_a = float(np.nanmean([c.handheld_e_a for c in speed_cands]))
+                        mean_dwell = float(np.nanmean([c.clamped_dwell_ms for c in speed_cands]))
+                        mean_score = float(np.nanmean([c.score for c in speed_cands]))
+                        if not np.isfinite(mean_score):
+                            mean_score = 1.0e9
+                        cand = RacketCandidate(
+                            ball_solref2=float(ball_solref2),
                             racket_solref2=float(solref2),
                             racket_mu=float(mu),
                             racket_half_thickness=float(args.racket_half_thickness),
                             racket_effective_mass=float(mass),
                             racket_joint_stiffness=float(k),
                             racket_joint_damping=float(d),
-                            incoming_speed=float(args.racket_incoming_speed),
-                            incoming_tangent_speed=float(args.racket_incoming_tangent_speed),
-                            max_time_s=float(args.racket_max_time_s),
+                            clamped_e_y=mean_e_y,
+                            handheld_e_a=mean_e_a,
+                            clamped_dwell_ms=mean_dwell,
+                            score=mean_score,
+                            feasible=bool(all(c.feasible for c in speed_cands)),
                         )
                         candidates.append(cand)
                         if args.verbose:
@@ -843,7 +958,8 @@ def run_racket(args, *, ball_solref2_for_racket: float | None = None) -> RacketC
                                 f"[CAND] solref2={cand.racket_solref2:.3f} mu={cand.racket_mu:.3f} M={cand.racket_effective_mass:.3f} "
                                 f"k={cand.racket_joint_stiffness:.1f} d={cand.racket_joint_damping:.2f} "
                                 f"e_y={cand.clamped_e_y:.3f} e_A={cand.handheld_e_a:.3f} dwell_ms={cand.clamped_dwell_ms:.3f} "
-                                f"feasible={cand.feasible} score={cand.score:.4f}"
+                                f"feasible={cand.feasible} score={cand.score:.4f} "
+                                f"(avg over speeds={speed_values})"
                             )
                         done += 1
                         if (done % args.progress_every == 0) or (done == total):
@@ -881,20 +997,21 @@ def apply_xml_from_best(best_bounce: BounceCandidate | None, best_racket: Racket
     root = _repo_root()
     if best_bounce is not None:
         ball_xml = root / "active_adaptation/assets/tennis/tennis_ball.xml"
-        court_xml = root / "active_adaptation/assets/tennis/tennis_court.xml"
+        tennis_py = root / "active_adaptation/assets/tennis.py"
         _update_xml_geom_attrs(
             ball_xml,
             "tennis_ball_geom",
             {"solref": f"0.010 {best_bounce.ball_solref2:.3f}"},
         )
-        _update_xml_geom_attrs(
-            court_xml,
-            "tennis_court_ball_collision",
-            {"solref": f"0.010 {best_bounce.court_solref2:.3f}"},
+        terrain_friction, _ = _read_terrain_constants(tennis_py)
+        _update_terrain_constants(
+            tennis_py,
+            friction=(float(terrain_friction[0]), float(terrain_friction[1]), float(terrain_friction[2])),
+            solref=(0.010, float(best_bounce.ground_solref2)),
         )
         print(
-            f"[APPLY] updated XML ball/court solref2 -> "
-            f"{best_bounce.ball_solref2:.3f}, {best_bounce.court_solref2:.3f}"
+            f"[APPLY] updated ball XML + terrain ground solref2 -> "
+            f"ball={best_bounce.ball_solref2:.3f}, ground={best_bounce.ground_solref2:.3f}"
         )
 
     if best_racket is not None:
@@ -915,7 +1032,7 @@ def apply_xml_from_best(best_bounce: BounceCandidate | None, best_racket: Racket
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Unified tennis contact calibration (pure MuJoCo).")
+    p = argparse.ArgumentParser(description="Unified tennis contact calibration (pure MuJoCo, ball-ground then ball-racket).")
     p.add_argument("--target", choices=["bounce", "racket", "all"], default="all")
     p.add_argument("--mode", choices=["easy", "medium", "hard"], default="hard")
     p.add_argument(
@@ -937,6 +1054,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--njmax", type=int, default=2000)
 
     p.add_argument("--drop-height-m", type=float, default=2.54)
+    p.add_argument("--itf-ball-type", choices=["type1", "type2", "type3", "high_altitude"], default="type2")
+    p.add_argument("--itf-rebound-min-m", type=float, default=None)
+    p.add_argument("--itf-rebound-max-m", type=float, default=None)
     p.add_argument("--launch-samples", type=int, default=64)
     p.add_argument("--max-time-s", type=float, default=2.5)
     p.add_argument("--max-episode-steps", type=int, default=0)
@@ -945,18 +1065,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ball-solref2-min", type=float, default=0.005)
     p.add_argument("--ball-solref2-max", type=float, default=0.300)
     p.add_argument("--ball-solref2-step", type=float, default=0.03)
-    p.add_argument("--court-solref2-min", type=float, default=0.02)
-    p.add_argument("--court-solref2-max", type=float, default=0.30)
-    p.add_argument("--court-solref2-step", type=float, default=0.02)
+    p.add_argument("--ground-solref2-min", type=float, default=0.02)
+    p.add_argument("--ground-solref2-max", type=float, default=0.30)
+    p.add_argument("--ground-solref2-step", type=float, default=0.02)
 
-    p.add_argument("--racket-ball-solref2", type=float, default=0.005)
-    p.add_argument("--racket-solref2-values", nargs="+", type=float, default=[0.18, 0.22, 0.24, 0.26, 0.30])
-    p.add_argument("--racket-mu-values", nargs="+", type=float, default=[0.35, 0.45, 0.55])
-    p.add_argument("--racket-effective-mass-values", nargs="+", type=float, default=[0.18, 0.22, 0.26])
-    p.add_argument("--racket-joint-stiffness-values", nargs="+", type=float, default=[0.0, 75.0])
+    p.add_argument("--racket-ball-solref2", type=float, default=None)
+    p.add_argument("--racket-solref2-values", nargs="+", type=float, default=[0.29, 0.30, 0.31, 0.32])
+    p.add_argument("--racket-mu-values", nargs="+", type=float, default=[2.5, 3.0, 3.5])
+    p.add_argument("--racket-effective-mass-values", nargs="+", type=float, default=[0.30, 0.35])
+    p.add_argument("--racket-joint-stiffness-values", nargs="+", type=float, default=[0.0])
     p.add_argument("--racket-joint-damping-values", nargs="+", type=float, default=[0.2, 0.4])
-    p.add_argument("--racket-half-thickness", type=float, default=0.005)
-    p.add_argument("--racket-incoming-speed", type=float, default=25.0)
+    p.add_argument("--racket-half-thickness", type=float, default=0.015)
+    p.add_argument("--racket-incoming-speed-values", nargs="+", type=float, default=[25.0, 30.0, 35.0])
     p.add_argument("--racket-incoming-tangent-speed", type=float, default=0.0)
     p.add_argument("--racket-max-time-s", type=float, default=0.25)
     return p

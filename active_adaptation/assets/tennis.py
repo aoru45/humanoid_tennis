@@ -11,20 +11,20 @@ BALL_MASS = 0.057
 COURT_HALF_WIDTH = 4.11
 COURT_HALF_LENGTH = 11.89
 NET_HEIGHT = 1.07
-# Ball uses receive-only mask: other geoms' contype must match this conaffinity.
-# Always enable collisions with racket(2), net(4), dedicated court bounce
-# surface(8), and default terrain(1) through conaffinity=14 + terrain
-# conaffinity extension in the scene.
+# Ball receives collision from racket(2) and net(4). Ground contact is handled
+# via ball contype(16) against terrain conaffinity(17) in the scene.
 BALL_COLLISION_CONTYPE = 16
-BALL_COLLISION_CONAFFINITY = 14
+BALL_COLLISION_CONAFFINITY = 6
 NET_COLLISION_CONTYPE = 4
 NET_COLLISION_CONAFFINITY = 0  # ball-only: avoid robot/net contacts
-# Dedicated court bounce collider that only interacts with the ball.
-COURT_BALL_COLLISION_CONTYPE = 8
-COURT_BALL_COLLISION_CONAFFINITY = 0  # ball-only: avoid robot/court contacts
-# Optional court-surface collider that only interacts with racket(contype=2).
-COURT_RACKET_COLLISION_CONTYPE = 1
-COURT_RACKET_COLLISION_CONAFFINITY = 2
+# Keep court-ground geometry visual-only. Ball-ground contact is handled by the
+# default terrain plane using the params below.
+COURT_BALL_COLLISION_CONTYPE = 0
+COURT_BALL_COLLISION_CONAFFINITY = 0
+COURT_RACKET_COLLISION_CONTYPE = 0
+COURT_RACKET_COLLISION_CONAFFINITY = 0
+TERRAIN_BALL_BOUNCE_FRICTION = (0.450, 0.010, 0.001)
+TERRAIN_BALL_BOUNCE_SOLREF = (0.010, 0.080)
 ASSET_DIR = Path(__file__).resolve().parent / "tennis"
 BALL_XML = ASSET_DIR / "tennis_ball.xml"
 COURT_XML = ASSET_DIR / "tennis_court.xml"
@@ -94,12 +94,11 @@ def _build_tennis_court_spec(
     court_ball_collision.conaffinity = COURT_BALL_COLLISION_CONAFFINITY
 
     court_racket_collision = _find_named(spec.geoms, "tennis_court_racket_collision")
-    if enable_racket_court_collision:
-        court_racket_collision.contype = COURT_RACKET_COLLISION_CONTYPE
-        court_racket_collision.conaffinity = COURT_RACKET_COLLISION_CONAFFINITY
-    else:
-        court_racket_collision.contype = 0
-        court_racket_collision.conaffinity = 0
+    # Court ground is visual-only. Keep this geom non-colliding regardless of
+    # runtime flag to avoid robot/court contacts.
+    _ = enable_racket_court_collision
+    court_racket_collision.contype = COURT_RACKET_COLLISION_CONTYPE
+    court_racket_collision.conaffinity = COURT_RACKET_COLLISION_CONAFFINITY
 
     spec.assets = _get_tennis_assets()
     return spec

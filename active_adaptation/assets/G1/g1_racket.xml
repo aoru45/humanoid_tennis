@@ -244,7 +244,7 @@
                           <geom name="right_hand_collision" class="collision" size="0.035" fromto="0.07 0 0 0.15 0.02 0" />
                           <body name="tennis_racket_mount" pos="0 0 0">
                             <geom name="tennis_racket_visual" type="mesh" mesh="tennis_racket" pos="0.0415 -0.003 0" quat="0.5 -0.5 0.5 -0.5" density="0" group="2" contype="0" conaffinity="0" />
-                            <geom name="tennis_racket_collision" type="ellipsoid" pos="0.1025 -0.004 0.4" quat="0 0 -0.7071068 0.7071068" size="0.115 0.185 0.005" mass="0.345643" condim="3" friction="0.550 0.05 0.01" solref="0.010 0.220" solimp="0.95 0.995 0.001 0.5 2" contype="2" conaffinity="1" />
+                            <geom name="tennis_racket_collision" type="ellipsoid" pos="0.1025 -0.004 0.4" quat="0 0 -0.7071068 0.7071068" size="0.115 0.185 0.015" mass="0.345643" condim="3" friction="2.500 0.05 0.01" solref="0.010 0.300" solimp="0.95 0.995 0.001 0.5 2" contype="2" conaffinity="1" />
                             <site name="tennis_racket_center" pos="0.1025 -0.004 0.4" quat="0 0 0.7071068 0.7071068" size="0.01 0.01 0.01" />
                           </body>
                         </body>

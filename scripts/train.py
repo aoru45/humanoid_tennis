@@ -110,17 +110,10 @@ def main(cfg: DictConfig):
 
         import inspect
         import shutil
+        from active_adaptation.envs.mdp.commands.highlevel_tennis import HighLevelTennisCommand
 
         source_paths = [inspect.getfile(policy.__class__)]
-        highlevel_cmd_path = os.path.join(
-            FILE_PATH,
-            "..",
-            "active_adaptation",
-            "envs",
-            "mdp",
-            "commands",
-            "highlevel_tennis.py",
-        )
+        highlevel_cmd_path = inspect.getfile(HighLevelTennisCommand)
         source_paths.append(os.path.abspath(highlevel_cmd_path))
 
         for source_path in source_paths:

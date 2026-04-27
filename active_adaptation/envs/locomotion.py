@@ -39,6 +39,8 @@ class SimpleEnv(_Env):
         )
 
         from active_adaptation.assets import (
+            TERRAIN_BALL_BOUNCE_FRICTION,
+            TERRAIN_BALL_BOUNCE_SOLREF,
             get_robot_cfg,
             get_tennis_ball_cfg,
             get_tennis_court_cfg,
@@ -51,7 +53,8 @@ class SimpleEnv(_Env):
                 court_texture = str(tennis_cfg.get("court_texture", "green"))
                 net_height = float(tennis_cfg.get("net_height", 1.07))
                 net_collision_half_thickness = float(tennis_cfg.get("net_collision_half_thickness", 0.06))
-                enable_racket_court_collision = bool(tennis_cfg.get("racket_court_collision", False))
+                # Court ground stays visual-only in highlevel tennis.
+                enable_racket_court_collision = False
                 scene_cfg.entities["tennis_court"] = get_tennis_court_cfg(
                     texture=court_texture,
                     net_height=net_height,
@@ -60,18 +63,25 @@ class SimpleEnv(_Env):
                 )
             if bool(tennis_cfg.get("add_ball", False)):
                 scene_cfg.entities["tennis_ball"] = get_tennis_ball_cfg()
-        if 1:
-            # Add ball-specific collision bit (16) to terrain conaffinity while
-            # preserving existing robot-foot collisions on bit 1.
-            scene_cfg.terrain.collisions = (
-                spec_cfg.CollisionCfg(
-                    geom_names_expr=(".*",),
-                    contype=1,
-                    conaffinity=17,
-                    condim=3,
-                    disable_other_geoms=False,
-                ),
-            )
+        # Add ball-specific collision bit (16) to terrain conaffinity while
+        # preserving existing robot-foot collisions on bit 1. In tennis+ball
+        # tasks, also apply the tuned bounce contact params on terrain.
+        terrain_collision_kwargs = {}
+        if tennis_cfg is not None and bool(tennis_cfg.get("add_ball", False)):
+            terrain_collision_kwargs = {
+                "friction": TERRAIN_BALL_BOUNCE_FRICTION,
+                "solref": TERRAIN_BALL_BOUNCE_SOLREF,
+            }
+        scene_cfg.terrain.collisions = (
+            spec_cfg.CollisionCfg(
+                geom_names_expr=(".*",),
+                contype=1,
+                conaffinity=17,
+                condim=3,
+                disable_other_geoms=False,
+                **terrain_collision_kwargs,
+            ),
+        )
 
         # contact_cfg = ContactSensorCfg(
         #     name="contact_forces",
@@ -133,7 +143,7 @@ class SimpleEnv(_Env):
             ball_court_sensor = ContactSensorCfg(
                 name="ball_court_contact",
                 primary=ContactMatch(mode="geom", pattern="tennis_ball_geom", entity="tennis_ball"),
-                secondary=ContactMatch(mode="geom", pattern="tennis_court_ball_collision", entity="tennis_court"),
+                secondary=ContactMatch(mode="body", pattern="terrain"),
                 fields=("found", "force"),
                 reduce="maxforce",
                 global_frame=False,
@@ -151,7 +161,9 @@ class SimpleEnv(_Env):
                     mode="geom",
                     pattern=".*_collision",
                     entity="robot",
-                    exclude=("tennis_racket_collision",),
+                    # Monitor racket self-collision against robot body, excluding
+                    # the racket geom itself and the mounting hand collision geom.
+                    exclude=("tennis_racket_collision", "right_hand_collision"),
                 ),
                 fields=("found",),
                 reduce="maxforce",
@@ -162,35 +174,6 @@ class SimpleEnv(_Env):
                 debug=False,
             )
             sensors.append(racket_body_sensor)
-
-
-            ball_default_ground_sensor = ContactSensorCfg(
-                name="ball_default_ground_contact",
-                primary=ContactMatch(mode="geom", pattern="tennis_ball_geom", entity="tennis_ball"),
-                secondary=ContactMatch(mode="body", pattern="terrain"),
-                fields=("found", "force"),
-                reduce="maxforce",
-                global_frame=False,
-                num_slots=1,
-                history_length=decimation_est,
-                debug=False,
-            )
-            sensors.append(ball_default_ground_sensor)
-            
-           
-            if bool(tennis_cfg.get("racket_court_collision", False)):
-                racket_court_sensor = ContactSensorCfg(
-                    name="racket_court_contact",
-                    primary=ContactMatch(mode="geom", pattern="tennis_racket_collision", entity="robot"),
-                    secondary=ContactMatch(mode="geom", pattern="tennis_court_racket_collision", entity="tennis_court"),
-                    fields=("found", "force"),
-                    reduce="maxforce",
-                    global_frame=False,
-                    num_slots=1,
-                    history_length=decimation_est,
-                    debug=False,
-                )
-                sensors.append(racket_court_sensor)
 
         scene_cfg.sensors = tuple(sensors)
 

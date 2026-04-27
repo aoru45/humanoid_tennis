@@ -5,7 +5,11 @@ cd "$(dirname "$0")"
 
 RUN_NAME="${RUN_NAME:-tennis-highlevel-$(date +%m%d-%H%M)}"
 RUN_NAME_SLUG="$(printf '%s' "${RUN_NAME}" | tr '[:space:]/' '__' | tr -cd '[:alnum:]_.-')"
-LAUNCH_BANK_FILE="${LAUNCH_BANK_FILE:-/mnt/data/xueaoru/motion_tracking/data/tennis_launch_bank/highlevel_launch_bank.npz}"
+LAUNCH_BANK_DIR="${LAUNCH_BANK_DIR:-/mnt/data/xueaoru/motion_tracking/data/tennis_launch_bank/highlevel_subsets}"
+LAUNCH_BANK_EASY_FILE="${LAUNCH_BANK_EASY_FILE:-${LAUNCH_BANK_DIR}/launch_bank_easy.npz}"
+LAUNCH_BANK_MEDIUM_FILE="${LAUNCH_BANK_MEDIUM_FILE:-${LAUNCH_BANK_DIR}/launch_bank_medium.npz}"
+LAUNCH_BANK_HARD_FILE="${LAUNCH_BANK_HARD_FILE:-${LAUNCH_BANK_DIR}/launch_bank_hard.npz}"
+LAUNCH_BANK_FILE="${LAUNCH_BANK_FILE:-}"  # optional single-bank fallback
 
 DEFAULT_HYDRA_RUN_DIR="./outputs/\${now:%Y-%m-%d}/\${now:%H-%M-%S}-${RUN_NAME_SLUG}"
 HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-$DEFAULT_HYDRA_RUN_DIR}"
@@ -13,9 +17,13 @@ HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-$DEFAULT_HYDRA_RUN_DIR}"
 
 uv run torchrun --nproc_per_node=4 scripts/train.py \
   task=G1/G1_tennis_highlevel "+exp=highlevel" \
-  "task.robot.name=g1_col_full_self_racket_noself" \
+  "task.robot.name=g1_col_full_self_racket" \
   "checkpoint_path=/mnt/data/xueaoru/motion_tracking/outputs/2026-04-26/05-23-39-tennis-highlevel-0426-0523/checkpoints/checkpoint_1500.pt" \
-  "task.command.launch_bank_file=${LAUNCH_BANK_FILE}" \
+  "task.command.config.launch.bank.file=${LAUNCH_BANK_FILE}" \
+  "task.command.config.launch.bank.easy_file=${LAUNCH_BANK_EASY_FILE}" \
+  "task.command.config.launch.bank.medium_file=${LAUNCH_BANK_MEDIUM_FILE}" \
+  "task.command.config.launch.bank.hard_file=${LAUNCH_BANK_HARD_FILE}" \
+  "task.command.config.launch.bank.use_curriculum=true" \
   "save_interval=300" \
   "start_iter=0" \
   "task.num_envs=4096" \
