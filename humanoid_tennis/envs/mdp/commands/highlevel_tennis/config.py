@@ -121,7 +121,7 @@ class HighLevelTennisConfig:
     post_hit_clean_bonus_window_steps: int = 32
     post_hit_stability_window_steps: int = 24
     recovery_outer_xy_radius: float = 1.10
-    recovery_inner_xy_radius: float = 0.60
+    recovery_inner_xy_radius: float = 1.10
     recovery_outer_heading_cos: float = 0.65
     recovery_inner_heading_cos: float = 0.82
     recovery_upper_joint_patterns: tuple[str, ...] = (

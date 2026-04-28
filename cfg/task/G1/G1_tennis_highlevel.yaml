@@ -47,7 +47,7 @@ command:
     post_hit_clean_bonus_window_steps: 32
     post_hit_stability_window_steps: 24
     recovery_outer_xy_radius: 1.10
-    recovery_inner_xy_radius: 0.60
+    recovery_inner_xy_radius: 1.10
     recovery_outer_heading_cos: 0.65
     recovery_inner_heading_cos: 0.82
     recovery_upper_joint_patterns: [waist_.*_joint, .*_shoulder_.*_joint, .*_elbow_joint, .*_wrist_.*_joint]
@@ -150,6 +150,7 @@ reward:
     stroke_mode_mismatch_on_hit: {weight: -120.0}
     post_hit_clean_bonus: {weight: 3.5}
     post_hit_recover_root_xy: {weight: 9.0, sigma: [0.35, 0.70]}
+    post_hit_recover_root_speed: {weight: 6.0, target_speed_max: 1.8, distance_norm: 1.6, speed_sigma: 0.45}
     post_hit_recover_heading: {weight: 3.0, sigma: [0.20, 0.45]}
     post_hit_recover_upper_pose: {weight: 4.0, sigma: [0.06, 0.14]}
     post_hit_alive_no_racket_body_contact: {weight: 1.2}

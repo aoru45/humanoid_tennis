@@ -405,6 +405,26 @@ class HighLevelTennisRewardMixin:
         return _exp_reward(root_xy_err, sigma) * active
 
     @reward
+    def post_hit_recover_root_speed(
+        self,
+        target_speed_max: float = 1.8,
+        distance_norm: float = 1.6,
+        speed_sigma: float = 0.45,
+    ):
+        active = (self._post_hit_recovery_mask() & (~self.finished)).float().unsqueeze(-1)
+        root_pos_w = self.asset.data.root_link_pos_w
+        root_vel_w = self.asset.data.root_link_lin_vel_w
+        delta_xy = self.recover_root_pos_w[:, :2] - root_pos_w[:, :2]
+        dist_xy = delta_xy.norm(dim=-1, keepdim=True)
+        dir_xy = delta_xy / dist_xy.clamp_min(1.0e-6)
+        speed_towards = (root_vel_w[:, :2] * dir_xy).sum(dim=-1, keepdim=True)
+        desired_speed = float(target_speed_max) * (dist_xy / max(float(distance_norm), 1.0e-6)).clamp(0.0, 1.0)
+        speed_err = (speed_towards - desired_speed).abs()
+        speed_term = torch.exp(-speed_err / max(float(speed_sigma), 1.0e-6))
+        moving_towards_term = torch.sigmoid((speed_towards + 0.05) / max(float(speed_sigma), 1.0e-6))
+        return speed_term * moving_towards_term * active
+
+    @reward
     def post_hit_recover_heading(
         self,
         sigma: Sequence[float] | None = (0.20, 0.45),

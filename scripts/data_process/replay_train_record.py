@@ -896,7 +896,7 @@ def main():
                             device=device,
                             dtype=torch.float32,
                         ).unsqueeze(0)
-                        ring_radius = 0.35
+                        ring_radius = 1.10
                         ring_width = 0.006
                         ring_z = float(recover_target[0, 2].item()) + 0.01
                         num_segments = 32
