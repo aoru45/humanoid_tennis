@@ -47,7 +47,7 @@ command:
     post_hit_clean_bonus_window_steps: 32
     post_hit_stability_window_steps: 24
     recovery_outer_xy_radius: 1.10
-    recovery_inner_xy_radius: 1.10
+    recovery_inner_xy_radius: 0.6
     recovery_outer_heading_cos: 0.65
     recovery_inner_heading_cos: 0.82
     recovery_upper_joint_patterns: [waist_.*_joint, .*_shoulder_.*_joint, .*_elbow_joint, .*_wrist_.*_joint]
@@ -83,7 +83,7 @@ command:
         curriculum_start_probs: [0.80, 0.15, 0.05]
         curriculum_target_probs: [0.20, 0.35, 0.45]
         curriculum_progress_up: 0.04
-        curriculum_progress_down: 0.06
+        curriculum_progress_down: 0.0
         curriculum_ema_alpha: 0.05
         curriculum_min_level_prob: 0.05
     court:
@@ -167,6 +167,7 @@ reward:
     ball_velocity_constraint: {weight: 65.0}
     racket_velocity_constraint: {weight: 60.0, min_racket_speed: 3.5}
     pelvis_facing_forward: {weight: 0.001}
+    recover_timeout_penalty: {weight: -10.0}
   reg:
     highlevel_action_l2: {weight: -2.0e-4}
     joint_torques_l2: {weight: 1.0e-6, enabled: true, joint_names: .*}
@@ -192,7 +193,6 @@ reward:
     episode_stroke_style_violation: {weight: -50.0}
     episode_fail_racket_body_pre_hit: {weight: -80.0}
     episode_fail_racket_body_post_hit: {weight: -320.0}
-    episode_fail_recover_timeout: {weight: -260.0}
 
 randomization: {}
 
@@ -202,7 +202,6 @@ termination:
   ball_out_of_bounds_termination: {}
   stroke_style_violation_termination: {}
   racket_body_contact_termination: {}
-  recover_timeout_termination: {}
   fall_over: {xy_thres: 0.90, z_thres: 0.40}
 
 sim:

@@ -821,8 +821,9 @@ class HighLevelTennisRewardMixin:
         return (self.finished & self.fail_racket_body & self.has_hit).float().unsqueeze(-1)
 
     @reward
-    def episode_fail_recover_timeout(self):
-        return (self.finished & self.fail_recover_timeout).float().unsqueeze(-1)
+    def recover_timeout_penalty(self):
+        # Penalty-only (non-terminal): when recovery wait times out, continue rally.
+        return self.fail_recover_timeout.float().unsqueeze(-1)
 
     @reward
     def episode_has_hit(self):

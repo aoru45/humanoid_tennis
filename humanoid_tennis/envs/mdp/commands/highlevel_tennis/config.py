@@ -45,7 +45,7 @@ class LaunchBankConfig:
     curriculum_start_probs: tuple[float, float, float] = (0.80, 0.15, 0.05)
     curriculum_target_probs: tuple[float, float, float] = (0.20, 0.35, 0.45)
     curriculum_progress_up: float = 0.04
-    curriculum_progress_down: float = 0.06
+    curriculum_progress_down: float = 0.0
     curriculum_ema_alpha: float = 0.05
     curriculum_min_level_prob: float = 0.05
 

@@ -24,10 +24,6 @@ class HighLevelTennisTerminationMixin:
     def racket_body_contact_termination(self):
         return self.fail_racket_body.unsqueeze(-1)
 
-    @termination
-    def recover_timeout_termination(self):
-        return self.fail_recover_timeout.unsqueeze(-1)
-
     def debug_draw(self):
         if not self.debug_draw_enabled:
             return

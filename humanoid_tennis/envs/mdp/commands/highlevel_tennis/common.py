@@ -29,7 +29,7 @@ class LaunchBankBuffer:
         self.curriculum_start_probs: torch.Tensor | None = None
         self.curriculum_target_probs: torch.Tensor | None = None
         self.curriculum_progress_up = 0.04
-        self.curriculum_progress_down = 0.06
+        self.curriculum_progress_down = 0.0
         self.curriculum_ema_alpha = 0.05
         self.curriculum_min_level_prob = 0.05
         self.curriculum_progress = 0.0
@@ -181,6 +181,7 @@ class LaunchBankBuffer:
         self.curriculum_start_probs = self._normalize_probs(start)
         self.curriculum_target_probs = self._normalize_probs(target)
         self.curriculum_progress_up = max(0.0, float(progress_up))
+        # Kept for config compatibility; curriculum is strictly non-decreasing.
         self.curriculum_progress_down = max(0.0, float(progress_down))
         self.curriculum_ema_alpha = min(max(float(ema_alpha), 0.0), 1.0)
         self.curriculum_min_level_prob = min(max(float(min_level_prob), 0.0), 0.30)
@@ -250,12 +251,10 @@ class LaunchBankBuffer:
         self.curriculum_success_ema = (1.0 - alpha) * self.curriculum_success_ema + alpha * float(succ)
         ema = min(max(float(self.curriculum_success_ema), 0.0), 1.0)
 
-        # Continuous EMA curriculum update (no threshold gating):
-        # - any positive success EMA pushes difficulty up smoothly
-        # - fallback is stronger when success EMA is low and current progress is high
+        # Monotonic curriculum: difficulty only increases over time.
+        # Progress rises with success EMA and is never decreased.
         up = self.curriculum_progress_up * ema
-        down = self.curriculum_progress_down * (1.0 - ema) * self.curriculum_progress
-        self.curriculum_progress += (up - down)
+        self.curriculum_progress += up
         self.curriculum_progress = float(min(max(self.curriculum_progress, 0.0), 1.0))
         assert self.curriculum_start_probs is not None
         assert self.curriculum_target_probs is not None

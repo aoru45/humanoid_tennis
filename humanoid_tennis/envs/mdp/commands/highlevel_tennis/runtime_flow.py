@@ -310,17 +310,19 @@ class HighLevelTennisRuntimeFlowMixin:
             if self.relaunch_require_recovery:
                 recover_ready = self.recover_zone_inner_hold_steps >= self.relaunch_recovery_hold_steps
                 recover_timeout = self.recover_zone_elapsed_steps >= self.relaunch_recovery_timeout_steps
-                timeout_fail = self._rally_relaunch_mask & recover_timeout & (~recover_ready)
+                timeout_fail = (
+                    self._rally_relaunch_mask
+                    & (self._rally_launch_delay <= 0)
+                    & recover_timeout
+                    & (~recover_ready)
+                )
                 if timeout_fail.any():
+                    # Timeout only applies a penalty; do not fail/reset the rally.
                     self.fail_recover_timeout[timeout_fail] = True
-                    # Recovery timeout is treated as failed rally closure.
-                    self.success[timeout_fail] = False
-                    self.success_done[timeout_fail] = False
                 self._rally_launch_ready[:] = (
                     self._rally_relaunch_mask
                     & (self._rally_launch_delay <= 0)
-                    & recover_ready
-                    & (~self.fail_recover_timeout)
+                    & (recover_ready | recover_timeout)
                 )
             else:
                 self._rally_launch_ready[:] = self._rally_relaunch_mask & (self._rally_launch_delay <= 0)
@@ -341,7 +343,6 @@ class HighLevelTennisRuntimeFlowMixin:
             | self.fail_out
             | self.fail_style
             | self.fail_racket_body
-            | self.fail_recover_timeout
         )
         # Rally failure event should be counted once (before finished flips to True).
         new_fail_event = (~self.finished) & (~success_done) & (fail_any | timeout)
