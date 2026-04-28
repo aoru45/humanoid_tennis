@@ -3,9 +3,27 @@ from __future__ import annotations
 import math
 
 import torch
+from humanoid_tennis.utils.math import quat_apply
 
 
 class HighLevelTennisRuntimeFlowMixin:
+    def _compute_recovery_zone_state(self) -> tuple[torch.Tensor, torch.Tensor]:
+        root_pos_w = self.asset.data.root_link_pos_w
+        root_quat_w = self.asset.data.root_link_quat_w
+        root_xy_err = (root_pos_w[:, :2] - self.recover_root_pos_w[:, :2]).norm(dim=-1)
+
+        root_forward_w = quat_apply(root_quat_w, self._forward_dir_b)
+        root_forward_xy = root_forward_w[:, :2]
+        root_forward_xy = root_forward_xy / root_forward_xy.norm(dim=-1, keepdim=True).clamp_min(1.0e-6)
+        target_forward_xy = self.recover_root_forward_xy / self.recover_root_forward_xy.norm(
+            dim=-1, keepdim=True
+        ).clamp_min(1.0e-6)
+        heading_cos = (root_forward_xy * target_forward_xy).sum(dim=-1)
+
+        outer = (root_xy_err <= self.recovery_outer_xy_radius) & (heading_cos >= self.recovery_outer_heading_cos)
+        inner = (root_xy_err <= self.recovery_inner_xy_radius) & (heading_cos >= self.recovery_inner_heading_cos)
+        return outer, inner
+
     def step(self, substep: int):
         if substep == 0:
             self._ensure_action_layout()
@@ -53,9 +71,17 @@ class HighLevelTennisRuntimeFlowMixin:
             stroke_mismatch = (target_forehand & (~used_forehand)) | (target_backhand & used_forehand)
             self.hit_stroke_mode_match_event[hit_mask] = stroke_match
             self.hit_stroke_mode_mismatch_event[hit_mask] = stroke_mismatch
+            self.hit_used_forehand_event[hit_mask] = used_forehand
+            hit_env_ids = hit_mask.nonzero(as_tuple=False).squeeze(-1)
+            if used_forehand.any():
+                self.last_hit_stroke_mode[hit_env_ids[used_forehand]] = self.STROKE_MODE_FOREHAND
+            backhand_used = ~used_forehand
+            if backhand_used.any():
+                self.last_hit_stroke_mode[hit_env_ids[backhand_used]] = self.STROKE_MODE_BACKHAND
+            self.hit_used_forehand_total += int(used_forehand.sum().item())
+            self.hit_used_backhand_total += int((~used_forehand).sum().item())
             if stroke_mismatch.any():
                 # Stroke-side mismatch should never be counted as a valid scoring hit.
-                hit_env_ids = hit_mask.nonzero(as_tuple=False).squeeze(-1)
                 mismatch_env_ids = hit_env_ids[stroke_mismatch]
                 self.fail_style[mismatch_env_ids] = True
                 self.stroke_style_violation_event[mismatch_env_ids] = True
@@ -89,7 +115,13 @@ class HighLevelTennisRuntimeFlowMixin:
                 (bounce_pos_l[:, 1] >= self.court_y_min_success)
                 & (bounce_pos_l[:, 1] <= self.court_y_limit)
             )
-            self.bounce_in[first_bounce] = x_in & y_in
+            bounce_in = x_in & y_in
+            self.bounce_in[first_bounce] = bounce_in
+            if bool(self.fail_on_wrong_bounce_side):
+                # First bounce must be in opponent court; otherwise fail immediately.
+                wrong_bounce = first_bounce.clone()
+                wrong_bounce[first_bounce] = ~bounce_in
+                self.fail_out[wrong_bounce] = True
 
         net_mask = (
             self.has_hit
@@ -190,6 +222,13 @@ class HighLevelTennisRuntimeFlowMixin:
             ball_pos_l[:, 2] <= (self.ball_radius + self.post_hit_dead_ball_height_margin)
         )
         hit_elapsed_steps = (self.task_step - self.first_hit_step).clamp_min(0)
+        wrong_outgoing_dir = (
+            self.has_hit
+            & (~self.has_bounce)
+            & (hit_elapsed_steps >= self.post_hit_forward_dir_grace_steps)
+            & (ball_vel_w[:, 1] <= self.post_hit_min_forward_speed)
+        )
+        self.fail_out |= wrong_outgoing_dir
         post_hit_dead_ball = (
             self.has_hit
             & (hit_elapsed_steps >= self.post_hit_dead_ball_min_steps)
@@ -215,14 +254,16 @@ class HighLevelTennisRuntimeFlowMixin:
         self.fail_miss |= self.has_hit & (~self.success) & post_hit_dead_ball_ready
 
         new_success_event = success_done & (~self.success_done)
+        self.success_event[:] = new_success_event
         if new_success_event.any():
             self.consecutive_return_count[new_success_event] += 1
+        if self.consecutive_return_count.numel() > 0:
+            cur_best = int(self.consecutive_return_count.max().item())
+            if cur_best > int(self.best_consecutive_return_total):
+                self.best_consecutive_return_total = cur_best
 
         timeout = self.task_step >= self.max_task_steps
         self.fail_racket_body |= self.racket_body_contact
-        fail_any = self.fail_miss | self.fail_net | self.fail_out | self.fail_style | self.fail_racket_body
-        # Rally failure event should be counted once (before finished flips to True).
-        new_fail_event = (~self.finished) & (~success_done) & (fail_any | timeout)
         self.hit_limit_reached[:] = False
         if self.max_consecutive_returns_before_finish > 0:
             self.hit_limit_reached[:] = (
@@ -235,15 +276,75 @@ class HighLevelTennisRuntimeFlowMixin:
             self._rally_relaunch_mask[:] = self._rally_relaunch_mask | new_relaunch
             if newly_set.any():
                 self._rally_launch_delay[newly_set] = self.launch_interval_steps
+                self.recover_zone_inner_hold_steps[newly_set] = 0
+                self.recover_zone_elapsed_steps[newly_set] = 0
+                self.recover_zone_outer_entered[newly_set] = False
+                self.recover_zone_inner_entered[newly_set] = False
+                self.recover_zone_outer_enter_event[newly_set] = False
+                self.recover_zone_inner_enter_event[newly_set] = False
+            waiting_mask = self._rally_relaunch_mask
+            if waiting_mask.any():
+                self.recover_zone_elapsed_steps[waiting_mask] += 1
+                recover_outer_now, recover_inner_now = self._compute_recovery_zone_state()
+                self.recover_zone_outer[:] = waiting_mask & recover_outer_now
+                self.recover_zone_inner[:] = waiting_mask & recover_inner_now
+                self.recover_zone_outer_enter_event[:] = (
+                    waiting_mask & recover_outer_now & (~self.recover_zone_outer_entered)
+                )
+                self.recover_zone_inner_enter_event[:] = (
+                    waiting_mask & recover_inner_now & (~self.recover_zone_inner_entered)
+                )
+                self.recover_zone_outer_entered |= self.recover_zone_outer_enter_event
+                self.recover_zone_inner_entered |= self.recover_zone_inner_enter_event
+                hold_now = waiting_mask & recover_inner_now
+                self.recover_zone_inner_hold_steps[hold_now] += 1
+                self.recover_zone_inner_hold_steps[waiting_mask & (~recover_inner_now)] = 0
+            else:
+                self.recover_zone_outer[:] = False
+                self.recover_zone_inner[:] = False
+                self.recover_zone_outer_enter_event[:] = False
+                self.recover_zone_inner_enter_event[:] = False
             waiting = self._rally_relaunch_mask & (self._rally_launch_delay > 0)
             if waiting.any():
                 self._rally_launch_delay[waiting] -= 1
-            self._rally_launch_ready[:] = self._rally_relaunch_mask & (self._rally_launch_delay <= 0)
+            if self.relaunch_require_recovery:
+                recover_ready = self.recover_zone_inner_hold_steps >= self.relaunch_recovery_hold_steps
+                recover_timeout = self.recover_zone_elapsed_steps >= self.relaunch_recovery_timeout_steps
+                timeout_fail = self._rally_relaunch_mask & recover_timeout & (~recover_ready)
+                if timeout_fail.any():
+                    self.fail_recover_timeout[timeout_fail] = True
+                    # Recovery timeout is treated as failed rally closure.
+                    self.success[timeout_fail] = False
+                    self.success_done[timeout_fail] = False
+                self._rally_launch_ready[:] = (
+                    self._rally_relaunch_mask
+                    & (self._rally_launch_delay <= 0)
+                    & recover_ready
+                    & (~self.fail_recover_timeout)
+                )
+            else:
+                self._rally_launch_ready[:] = self._rally_relaunch_mask & (self._rally_launch_delay <= 0)
             success_finish = success_done & self.hit_limit_reached
         else:
             self._rally_relaunch_mask[:] = False
             self._rally_launch_ready[:] = False
+            self.recover_zone_outer[:] = False
+            self.recover_zone_inner[:] = False
+            self.recover_zone_outer_enter_event[:] = False
+            self.recover_zone_inner_enter_event[:] = False
             success_finish = success_done
+
+        success_done = self.success_done | self.success
+        fail_any = (
+            self.fail_miss
+            | self.fail_net
+            | self.fail_out
+            | self.fail_style
+            | self.fail_racket_body
+            | self.fail_recover_timeout
+        )
+        # Rally failure event should be counted once (before finished flips to True).
+        new_fail_event = (~self.finished) & (~success_done) & (fail_any | timeout)
 
         # Curriculum update uses resolved launch outcomes:
         # success: first legal bounce in opponent court; failure: miss/net/out/style.
@@ -274,9 +375,12 @@ class HighLevelTennisRuntimeFlowMixin:
             self._rally_launch_ready[relaunch_ids] = False
             self._rally_launch_delay[relaunch_ids] = 0
         self.hit_event[:] = False
+        self.success_event[:] = False
         self.bounce_event[:] = False
         self.pass_net_event[:] = False
         self.net_clearance_event[:] = False
+        self.recover_zone_outer_enter_event[:] = False
+        self.recover_zone_inner_enter_event[:] = False
         self.stroke_style_violation_event[:] = False
         self.prehit_zone_event[:] = False
         self.racket_ball_contact_event[:] = False
@@ -285,4 +389,5 @@ class HighLevelTennisRuntimeFlowMixin:
         self.racket_body_contact_event[:] = False
         self.hit_stroke_mode_match_event[:] = False
         self.hit_stroke_mode_mismatch_event[:] = False
+        self.hit_used_forehand_event[:] = False
         self.hit_racket_speed[:] = 0.0

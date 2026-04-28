@@ -18,8 +18,8 @@ HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-$DEFAULT_HYDRA_RUN_DIR}"
 
 
 PULSE_PTH="/mnt/data/xueaoru/motion_tracking/outputs/2026-04-23/15-18-37-tracking-pulse-run-tennis-0423-1518/checkpoints/checkpoint_final.pt"
-RESUME_PTH="/mnt/data/xueaoru/motion_tracking/outputs/2026-04-27/00-49-30-tennis-highlevel-0427-0049/checkpoints/checkpoint_8400.pt"
-# RESUME_PTH="/mnt/data/xueaoru/motion_tracking/outputs/2026-04-27/13-29-49-tennis-highlevel-0427-1329/checkpoints/checkpoint_900.pt"
+# RESUME_PTH="/mnt/data/xueaoru/motion_tracking/outputs/2026-04-27/00-49-30-tennis-highlevel-0427-0049/checkpoints/checkpoint_8400.pt"
+RESUME_PTH="/mnt/data/xueaoru/motion_tracking/outputs/2026-04-28/18-07-42-tennis-highlevel-0428-1807/checkpoints/checkpoint_600.pt"
 uv run torchrun --nproc_per_node=4 scripts/train.py \
   task=G1/G1_tennis_highlevel "+exp=highlevel" \
   "task.robot.name=g1_col_full_self_racket" \
@@ -29,7 +29,7 @@ uv run torchrun --nproc_per_node=4 scripts/train.py \
   "task.command.config.launch.bank.medium_file=${LAUNCH_BANK_MEDIUM_FILE}" \
   "task.command.config.launch.bank.hard_file=${LAUNCH_BANK_HARD_FILE}" \
   "task.command.config.launch.bank.use_curriculum=true" \
-  "save_interval=300" \
+  "save_interval=100" \
   "start_iter=0" \
   "task.num_envs=4096" \
   "hydra.run.dir=${HYDRA_RUN_DIR}" \

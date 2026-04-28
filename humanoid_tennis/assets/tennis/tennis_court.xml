@@ -5,22 +5,25 @@
   </asset>
   <worldbody>
     <body name="tennis_court_root" pos="0 0 0">
-      <geom name="court_visual" type="box" pos="0 0 0.001" size="4.11 11.89 0.001" material="tennis_court_material" contype="0" conaffinity="0" />
-      <geom name="court_center_line" type="box" pos="0 0 0.002" size="0.03 11.89 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
-      <geom name="court_left_line" type="box" pos="-4.11 0 0.002" size="0.03 11.89 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
-      <geom name="court_right_line" type="box" pos="4.11 0 0.002" size="0.03 11.89 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
-      <geom name="court_left_singles_line" type="box" pos="-3.0825 0 0.002" size="0.03 11.89 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
-      <geom name="court_right_singles_line" type="box" pos="3.0825 0 0.002" size="0.03 11.89 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
-      <geom name="court_service_line_near" type="box" pos="0 -6.4206 0.002" size="3.0825 0.03 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
-      <geom name="court_service_line_far" type="box" pos="0 6.4206 0.002" size="3.0825 0.03 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
-      <geom name="court_center_service_line_near" type="box" pos="0 -3.2103 0.002" size="0.03 3.2103 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
-      <geom name="court_center_service_line_far" type="box" pos="0 3.2103 0.002" size="0.03 3.2103 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
-      <geom name="court_baseline_near" type="box" pos="0 -11.89 0.002" size="4.11 0.03 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
-      <geom name="court_baseline_far" type="box" pos="0 11.89 0.002" size="4.11 0.03 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
+      <geom name="court_visual" type="box" pos="0 0 0.001" size="5.485 11.885 0.001" material="tennis_court_material" contype="0" conaffinity="0" />
+      <!-- ITF-correct line layout (all lines at 5cm width -> half-width 0.025m):
+           doubles width 10.97m, singles width 8.23m, service line distance 6.40m -->
+      <geom name="court_left_line" type="box" pos="-5.485 0 0.002" size="0.025 11.885 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
+      <geom name="court_right_line" type="box" pos="5.485 0 0.002" size="0.025 11.885 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
+      <geom name="court_left_singles_line" type="box" pos="-4.115 0 0.002" size="0.025 11.885 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
+      <geom name="court_right_singles_line" type="box" pos="4.115 0 0.002" size="0.025 11.885 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
+      <geom name="court_service_line_near" type="box" pos="0 -6.40 0.002" size="4.115 0.025 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
+      <geom name="court_service_line_far" type="box" pos="0 6.40 0.002" size="4.115 0.025 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
+      <geom name="court_center_service_line_near" type="box" pos="0 -3.20 0.002" size="0.025 3.20 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
+      <geom name="court_center_service_line_far" type="box" pos="0 3.20 0.002" size="0.025 3.20 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
+      <geom name="court_baseline_near" type="box" pos="0 -11.885 0.002" size="5.485 0.025 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
+      <geom name="court_baseline_far" type="box" pos="0 11.885 0.002" size="5.485 0.025 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
+      <geom name="court_center_mark_near" type="box" pos="0 -11.81 0.002" size="0.025 0.05 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
+      <geom name="court_center_mark_far" type="box" pos="0 11.81 0.002" size="0.025 0.05 0.0005" rgba="0.94 0.94 0.94 1.0" contype="0" conaffinity="0" />
       <geom name="tennis_net_visual" type="box" pos="0 0 0.535" size="4.11 0.02 0.535" rgba="0.9 0.9 0.9 0.4" contype="0" conaffinity="0" />
       <geom name="tennis_net_collision" type="box" pos="0 0 0.535" size="4.11 0.06 0.535" rgba="0.9 0.9 0.9 0.05" condim="3" friction="0.80 0.05 0.01" contype="4" conaffinity="0" />
-      <geom name="tennis_court_ball_collision" type="box" pos="0 0 0.008" size="4.11 11.89 0.008" rgba="0.1 0.9 0.1 0.02" condim="3" friction="0.45 0.01 0.001" solref="0.010 0.080" contype="0" conaffinity="0" />
-      <geom name="tennis_court_racket_collision" type="box" pos="0 0 0.01" size="4.11 11.89 0.01" rgba="0.1 0.6 0.1 0.03" condim="3" friction="0.90 0.05 0.01" contype="0" conaffinity="0" />
+      <geom name="tennis_court_ball_collision" type="box" pos="0 0 0.008" size="5.485 11.885 0.008" rgba="0.1 0.9 0.1 0.02" condim="3" friction="0.45 0.01 0.001" solref="0.010 0.080" contype="0" conaffinity="0" />
+      <geom name="tennis_court_racket_collision" type="box" pos="0 0 0.01" size="5.485 11.885 0.01" rgba="0.1 0.6 0.1 0.03" condim="3" friction="0.90 0.05 0.01" contype="0" conaffinity="0" />
     </body>
   </worldbody>
 </mujoco>

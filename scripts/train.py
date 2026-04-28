@@ -50,6 +50,39 @@ _ACTOR_STD_KEEP_KEYS = {
     "actor_std/wrist_mean",
 }
 
+_HIGHLEVEL_CONSOLE_DROP_EXACT = {
+    "adapt/reg_loss",
+    "action/encoder_grad_norm",
+    "lr",
+    "highlevel/live_fail_miss_ratio",
+    "highlevel/live_fail_net_ratio",
+    "highlevel/live_fail_out_ratio",
+    "highlevel/live_racket_body_contact_ratio",
+    "highlevel/live_target_forehand_ratio",
+    "highlevel/live_target_backhand_ratio",
+    "highlevel/hit_used_forehand_total",
+    "highlevel/hit_used_backhand_total",
+    "highlevel/sampling_desired_mode_forehand",
+    "highlevel/sampling_desired_mode_backhand",
+    "highlevel/live_hit_mode_mismatch_ratio",
+    "highlevel/curriculum_progress",
+    "highlevel/curriculum_success_ema",
+    "highlevel/curriculum_success_batch",
+}
+
+_HIGHLEVEL_CONSOLE_DROP_PREFIX = (
+    "actor/",
+    "critic/",
+)
+
+_HIGHLEVEL_CONSOLE_FORCE_KEEP_EXACT = {
+    "highlevel/live_fail_recover_timeout_ratio",
+    "highlevel/live_recover_zone_outer_ratio",
+    "highlevel/live_recover_zone_inner_ratio",
+    "highlevel/live_recover_hold_mean",
+    "highlevel/live_success_event_ratio",
+}
+
 
 def _compact_wandb_metrics(info: dict) -> dict:
     compact = {}
@@ -93,6 +126,25 @@ def _collect_live_reward_metrics(data, env) -> dict:
     return metrics
 
 
+def _filter_console_metrics(info: dict, *, highlevel_task: bool) -> dict:
+    out = {}
+    for key, value in info.items():
+        if not isinstance(value, (float, int)):
+            continue
+        if highlevel_task and key in _HIGHLEVEL_CONSOLE_FORCE_KEEP_EXACT:
+            out[key] = value
+            continue
+        if str(key).startswith("highlevel/reward_live/"):
+            continue
+        if highlevel_task:
+            if key in _HIGHLEVEL_CONSOLE_DROP_EXACT:
+                continue
+            if any(str(key).startswith(prefix) for prefix in _HIGHLEVEL_CONSOLE_DROP_PREFIX):
+                continue
+        out[key] = value
+    return out
+
+
 @hydra.main(config_path=CONFIG_PATH, config_name="train", version_base=None)
 def main(cfg: DictConfig):
     OmegaConf.resolve(cfg)
@@ -118,6 +170,7 @@ def main(cfg: DictConfig):
     start_frame = start_iter * frames_per_batch
 
     need_logging = aa.is_main_process() and cfg.wandb.get("mode", "disabled") != "disabled"
+    is_highlevel_task = hasattr(env, "command_manager") and hasattr(env.command_manager, "consecutive_return_count")
     if need_logging:
         compact_metrics = bool(cfg.wandb.get("compact_metrics", True))
         include_env_extra = bool(cfg.wandb.get("include_env_extra", True))
@@ -289,11 +342,7 @@ def main(cfg: DictConfig):
 
             run.log(info, step=i)
             if console_log_enabled:
-                console_info = {
-                    k: v
-                    for k, v in info.items()
-                    if isinstance(v, (float, int)) and not str(k).startswith("highlevel/reward_live/")
-                }
+                console_info = _filter_console_metrics(info, highlevel_task=is_highlevel_task)
                 print(OmegaConf.to_yaml(console_info))
     
     if aa.is_main_process():

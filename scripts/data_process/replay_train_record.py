@@ -520,6 +520,14 @@ def main():
         default=0.22,
         help="Debug line length for racket +face/-face directions.",
     )
+    parser.add_argument(
+        "--recovery-target-offset",
+        type=float,
+        nargs=3,
+        default=(0.0, -10.0, 0.81),
+        metavar=("RX", "RY", "RZ"),
+        help="Noise-free recovery target offset in local env frame (added to env origin).",
+    )
     args = parser.parse_args()
     argv = set(sys.argv[1:])
 
@@ -702,6 +710,11 @@ def main():
         initial_value=False,
         hint="Draw racket mount origin + reward racket center (body + local offset).",
     )
+    recovery_target_debug_checkbox = viewer.gui.add_checkbox(
+        "Show Recovery Target",
+        initial_value=True,
+        hint="Draw the return target (first-frame root position for this env slot).",
+    )
 
     state: dict[str, object] = {
         "slot": -1,
@@ -787,6 +800,16 @@ def main():
         residual = root_xy_first - slot_origin.detach().cpu().numpy()[:, :2]
         residual_std = float(np.linalg.norm(np.std(residual, axis=0)))
         env_id = int(env_ids_full[slot_idx]) if env_ids_full is not None else slot_idx
+        recovery_target_offset = torch.tensor(
+            args.recovery_target_offset,
+            device=device,
+            dtype=torch.float32,
+        )
+        if recovery_target_offset.numel() != 3:
+            raise ValueError(
+                f"--recovery-target-offset must provide exactly 3 floats, got {args.recovery_target_offset}."
+            )
+        recover_target_w = slot_origin[0] + recovery_target_offset
 
         state["slot"] = int(slot_idx)
         state["qpos_slot"] = qpos_slot
@@ -798,11 +821,17 @@ def main():
         state["launch_steps"] = launch_steps
         state["launch_count"] = int(launch_steps.size)
         state["launch_index"] = used_launch_index
+        state["recover_target_w"] = recover_target_w.detach().cpu().numpy().copy()
 
         print(
             "[INFO] Switched replay slot: "
             f"slot={slot_idx}, env_id={env_id}, reason={reason}, "
             f"range=[{start_step}, {end_step}), residual_std_vs_root0={residual_std:.4f}"
+        )
+        rt = state["recover_target_w"]
+        print(
+            "[INFO] Recovery target (world): "
+            f"x={float(rt[0]):+.3f}, y={float(rt[1]):+.3f}, z={float(rt[2]):+.3f}"
         )
 
     _switch_slot(int(effective_env_index), reason="init")
@@ -822,7 +851,7 @@ def main():
     )
     print(f"[INFO] Base playback frame range: [{base_start_step}, {base_end_step}) ({base_end_step - base_start_step} frames).")
     print("[INFO] Change `Env Slot` in GUI to switch replay target without restarting.")
-    print("[INFO] Toggle `Show Racket Center Debug` in GUI to visualize reward racket-center geometry.")
+    print("[INFO] Toggle `Show Racket Center Debug` / `Show Recovery Target` in GUI.")
     print("Press Ctrl+C to exit.")
 
     frame_dt = float(step_dt) / float(args.speed)
@@ -835,7 +864,7 @@ def main():
         f"step_interval={viewer_step_interval}",
     )
     start_time = time.perf_counter()
-    racket_debug_prev_on = False
+    debug_prev_on = False
     try:
         while True:
             desired_slot = int(env_dropdown.value)
@@ -855,10 +884,40 @@ def main():
                 scene.update(physics_dt)
 
                 show_racket_debug = bool(racket_center_debug_checkbox.value)
-                if show_racket_debug:
+                show_recovery_target_debug = bool(recovery_target_debug_checkbox.value)
+                show_any_debug = show_racket_debug or show_recovery_target_debug
+                if show_any_debug:
                     if not viser_scene.debug_visualization_enabled:
                         viser_scene.debug_visualization_enabled = True
                     viser_scene.clear()
+                    if show_recovery_target_debug:
+                        recover_target = torch.as_tensor(
+                            state["recover_target_w"],
+                            device=device,
+                            dtype=torch.float32,
+                        ).unsqueeze(0)
+                        ring_radius = 0.35
+                        ring_width = 0.006
+                        ring_z = float(recover_target[0, 2].item()) + 0.01
+                        num_segments = 32
+                        angles = np.linspace(0.0, 2.0 * np.pi, num_segments + 1, dtype=np.float32)
+                        for i in range(num_segments):
+                            a0 = float(angles[i])
+                            a1 = float(angles[i + 1])
+                            p0 = recover_target[0].clone()
+                            p1 = recover_target[0].clone()
+                            p0[0] += ring_radius * np.cos(a0)
+                            p0[1] += ring_radius * np.sin(a0)
+                            p1[0] += ring_radius * np.cos(a1)
+                            p1[1] += ring_radius * np.sin(a1)
+                            p0[2] = ring_z
+                            p1[2] = ring_z
+                            viser_scene.add_cylinder(
+                                p0,
+                                p1,
+                                radius=ring_width,
+                                color=(1.0, 0.92, 0.15, 0.95),
+                            )
                     racket_mount_w, racket_center_w = _compute_racket_center_w(
                         robot=robot,
                         racket_body_id=racket_body_id,
@@ -875,52 +934,53 @@ def main():
                     face_len = float(racket_face_length)
                     face_plus_end_w = racket_center_w + face_plus_dir_w * face_len
                     face_minus_end_w = racket_center_w + face_minus_dir_w * face_len
-                    viser_scene.add_sphere(
-                        racket_mount_w[0],
-                        radius=center_radius * 0.55,
-                        color=(1.0, 0.6, 0.0, 0.95),
-                    )
-                    viser_scene.add_sphere(
-                        racket_center_w[0],
-                        radius=center_radius,
-                        color=(0.1, 1.0, 0.1, 0.95),
-                    )
-                    viser_scene.add_cylinder(
-                        racket_mount_w[0],
-                        racket_center_w[0],
-                        radius=max(center_radius * 0.20, 0.003),
-                        color=(0.1, 1.0, 0.1, 0.80),
-                    )
-                    viser_scene.add_cylinder(
-                        racket_center_w[0],
-                        face_plus_end_w[0],
-                        radius=max(center_radius * 0.16, 0.0028),
-                        color=(1.0, 0.15, 0.15, 0.95),
-                    )
-                    viser_scene.add_cylinder(
-                        racket_center_w[0],
-                        face_minus_end_w[0],
-                        radius=max(center_radius * 0.16, 0.0028),
-                        color=(0.15, 0.35, 1.0, 0.95),
-                    )
-                    viser_scene.add_sphere(
-                        face_plus_end_w[0],
-                        radius=max(center_radius * 0.42, 0.010),
-                        color=(1.0, 0.15, 0.15, 0.95),
-                    )
-                    viser_scene.add_sphere(
-                        face_minus_end_w[0],
-                        radius=max(center_radius * 0.42, 0.010),
-                        color=(0.15, 0.35, 1.0, 0.95),
-                    )
-                    viser_scene.add_sphere(
-                        ball_pos_w[0],
-                        radius=max(center_radius * 0.45, 0.015),
-                        color=(0.15, 0.55, 1.0, 0.90),
-                    )
-                elif racket_debug_prev_on:
+                    if show_racket_debug:
+                        viser_scene.add_sphere(
+                            racket_mount_w[0],
+                            radius=center_radius * 0.55,
+                            color=(1.0, 0.6, 0.0, 0.95),
+                        )
+                        viser_scene.add_sphere(
+                            racket_center_w[0],
+                            radius=center_radius,
+                            color=(0.1, 1.0, 0.1, 0.95),
+                        )
+                        viser_scene.add_cylinder(
+                            racket_mount_w[0],
+                            racket_center_w[0],
+                            radius=max(center_radius * 0.20, 0.003),
+                            color=(0.1, 1.0, 0.1, 0.80),
+                        )
+                        viser_scene.add_cylinder(
+                            racket_center_w[0],
+                            face_plus_end_w[0],
+                            radius=max(center_radius * 0.16, 0.0028),
+                            color=(1.0, 0.15, 0.15, 0.95),
+                        )
+                        viser_scene.add_cylinder(
+                            racket_center_w[0],
+                            face_minus_end_w[0],
+                            radius=max(center_radius * 0.16, 0.0028),
+                            color=(0.15, 0.35, 1.0, 0.95),
+                        )
+                        viser_scene.add_sphere(
+                            face_plus_end_w[0],
+                            radius=max(center_radius * 0.42, 0.010),
+                            color=(1.0, 0.15, 0.15, 0.95),
+                        )
+                        viser_scene.add_sphere(
+                            face_minus_end_w[0],
+                            radius=max(center_radius * 0.42, 0.010),
+                            color=(0.15, 0.35, 1.0, 0.95),
+                        )
+                        viser_scene.add_sphere(
+                            ball_pos_w[0],
+                            radius=max(center_radius * 0.45, 0.015),
+                            color=(0.15, 0.55, 1.0, 0.90),
+                        )
+                elif debug_prev_on:
                     viser_scene.clear()
-                racket_debug_prev_on = show_racket_debug
+                debug_prev_on = show_any_debug
 
                 viser_scene.update(_to_cpu_wp_data(sim.data))
 

@@ -34,18 +34,33 @@ class HighLevelTennisStateMixin:
         self,
         *,
         env_ids: torch.Tensor,
-        target_bounce_w: torch.Tensor,
+        contact_ref_w: torch.Tensor,
         root_pos_w: torch.Tensor,
         root_quat_w: torch.Tensor,
     ) -> None:
         if env_ids.numel() == 0:
             return
-        target_bounce_b = quat_apply_inverse(root_quat_w, target_bounce_w - root_pos_w)
-        contact_lateral = target_bounce_b[:, 1]
+        target, contact_lateral = self._infer_stroke_mode_from_contact_ref(
+            contact_ref_w=contact_ref_w,
+            root_pos_w=root_pos_w,
+            root_quat_w=root_quat_w,
+        )
+        self.stroke_mode_target[env_ids] = target
+        self.stroke_mode_contact_lateral[env_ids, 0] = contact_lateral
+
+    def _infer_stroke_mode_from_contact_ref(
+        self,
+        *,
+        contact_ref_w: torch.Tensor,
+        root_pos_w: torch.Tensor,
+        root_quat_w: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        contact_ref_b = quat_apply_inverse(root_quat_w, contact_ref_w - root_pos_w)
+        contact_lateral = contact_ref_b[:, 1]
         deadzone = float(self.stroke_mode_lateral_deadzone)
 
         target = torch.full(
-            (env_ids.numel(),),
+            (contact_ref_w.shape[0],),
             self.STROKE_MODE_NEUTRAL,
             dtype=torch.long,
             device=self.device,
@@ -54,9 +69,124 @@ class HighLevelTennisStateMixin:
         backhand_mask = contact_lateral >= deadzone
         target[forehand_mask] = self.STROKE_MODE_FOREHAND
         target[backhand_mask] = self.STROKE_MODE_BACKHAND
+        return target, contact_lateral
 
-        self.stroke_mode_target[env_ids] = target
-        self.stroke_mode_contact_lateral[env_ids, 0] = contact_lateral
+    def _infer_stroke_mode_from_launch_batch(
+        self,
+        *,
+        launch_pos_w: torch.Tensor,
+        launch_vel_w: torch.Tensor,
+        target_bounce_w: torch.Tensor,
+        root_pos_w: torch.Tensor,
+        root_quat_w: torch.Tensor,
+        gravity_z: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        contact_pos_w, _, contact_valid, _, _ = self._incoming_contact_target(
+            launch_pos_w,
+            launch_vel_w,
+            gravity_z=gravity_z,
+        )
+        contact_ref_w = torch.where(contact_valid.unsqueeze(-1), contact_pos_w, target_bounce_w)
+        return self._infer_stroke_mode_from_contact_ref(
+            contact_ref_w=contact_ref_w,
+            root_pos_w=root_pos_w,
+            root_quat_w=root_quat_w,
+        )
+
+    def _resample_launch_for_desired_mode(
+        self,
+        *,
+        env_ids: torch.Tensor,
+        launch_pos_w: torch.Tensor,
+        launch_vel_w: torch.Tensor,
+        launch_ang_w: torch.Tensor,
+        target_bounce_w: torch.Tensor,
+        sampled_level_ids: torch.Tensor,
+        root_pos_w: torch.Tensor,
+        root_quat_w: torch.Tensor,
+        gravity_z: torch.Tensor,
+        desired_mode: torch.Tensor | int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        target_mode, contact_lateral = self._infer_stroke_mode_from_launch_batch(
+            launch_pos_w=launch_pos_w,
+            launch_vel_w=launch_vel_w,
+            target_bounce_w=target_bounce_w,
+            root_pos_w=root_pos_w,
+            root_quat_w=root_quat_w,
+            gravity_z=gravity_z,
+        )
+        if isinstance(desired_mode, torch.Tensor):
+            desired_modes = desired_mode.to(device=self.device, dtype=torch.long)
+        else:
+            desired_modes = torch.full(
+                (env_ids.numel(),),
+                int(desired_mode),
+                dtype=torch.long,
+                device=self.device,
+            )
+        if desired_modes.shape[0] != env_ids.numel():
+            raise ValueError(
+                f"desired_mode shape mismatch: expected {env_ids.numel()}, got {desired_modes.shape}"
+            )
+        valid_desired = (desired_modes == self.STROKE_MODE_FOREHAND) | (
+            desired_modes == self.STROKE_MODE_BACKHAND
+        )
+        need = valid_desired & (target_mode != desired_modes)
+        rounds = int(self.balance_stroke_mode_max_resample_rounds)
+        for _ in range(max(0, rounds)):
+            if not need.any():
+                break
+            local_ids = need.nonzero(as_tuple=False).squeeze(-1)
+            sub_env_ids = env_ids[local_ids]
+            sub_launch_pos_w, sub_launch_vel_w, sub_launch_ang_w, sub_target_bounce_w, sub_level_ids = self._sample_ball_launch(
+                sub_env_ids
+            )
+            sub_target_mode, sub_contact_lateral = self._infer_stroke_mode_from_launch_batch(
+                launch_pos_w=sub_launch_pos_w,
+                launch_vel_w=sub_launch_vel_w,
+                target_bounce_w=sub_target_bounce_w,
+                root_pos_w=root_pos_w[local_ids],
+                root_quat_w=root_quat_w[local_ids],
+                gravity_z=gravity_z[local_ids],
+            )
+            accept = sub_target_mode == desired_modes[local_ids]
+            if not accept.any():
+                continue
+            accept_ids = local_ids[accept]
+            launch_pos_w[accept_ids] = sub_launch_pos_w[accept]
+            launch_vel_w[accept_ids] = sub_launch_vel_w[accept]
+            launch_ang_w[accept_ids] = sub_launch_ang_w[accept]
+            target_bounce_w[accept_ids] = sub_target_bounce_w[accept]
+            sampled_level_ids[accept_ids] = sub_level_ids[accept]
+            target_mode[accept_ids] = sub_target_mode[accept]
+            contact_lateral[accept_ids] = sub_contact_lateral[accept]
+            need = valid_desired & (target_mode != desired_modes)
+
+        return (
+            launch_pos_w,
+            launch_vel_w,
+            launch_ang_w,
+            target_bounce_w,
+            sampled_level_ids,
+            target_mode,
+            contact_lateral,
+        )
+
+    def _desired_stroke_mode_for_next_launch(self, env_ids: torch.Tensor) -> torch.Tensor:
+        last_mode = self.last_hit_stroke_mode[env_ids]
+        desired = torch.full_like(last_mode, self.STROKE_MODE_NEUTRAL)
+        desired[last_mode == self.STROKE_MODE_FOREHAND] = self.STROKE_MODE_BACKHAND
+        desired[last_mode == self.STROKE_MODE_BACKHAND] = self.STROKE_MODE_FOREHAND
+
+        unknown = desired == self.STROKE_MODE_NEUTRAL
+        if unknown.any():
+            fallback = (
+                self.STROKE_MODE_FOREHAND
+                if int(self.hit_used_backhand_total) > int(self.hit_used_forehand_total)
+                else self.STROKE_MODE_BACKHAND
+            )
+            desired[unknown] = int(fallback)
+        return desired
 
     def _write_ball_launch(
         self,
@@ -67,7 +197,52 @@ class HighLevelTennisStateMixin:
     ) -> None:
         if env_ids.numel() == 0:
             return
+        if root_pos_w is None:
+            root_pos_w = self.asset.data.root_link_pos_w[env_ids]
+        if root_quat_w is None:
+            root_quat_w = self.asset.data.root_link_quat_w[env_ids]
+        gravity_z = self.gravity[env_ids]
+
         launch_pos_w, launch_vel_w, launch_ang_w, target_bounce_w, sampled_level_ids = self._sample_ball_launch(env_ids)
+        desired_modes = torch.full(
+            (env_ids.numel(),),
+            self.STROKE_MODE_NEUTRAL,
+            dtype=torch.long,
+            device=self.device,
+        )
+
+        if bool(self.balance_stroke_mode_sampling):
+            desired_modes = self._desired_stroke_mode_for_next_launch(env_ids)
+            (
+                launch_pos_w,
+                launch_vel_w,
+                launch_ang_w,
+                target_bounce_w,
+                sampled_level_ids,
+                target_mode,
+                contact_lateral,
+            ) = self._resample_launch_for_desired_mode(
+                env_ids=env_ids,
+                launch_pos_w=launch_pos_w,
+                launch_vel_w=launch_vel_w,
+                launch_ang_w=launch_ang_w,
+                target_bounce_w=target_bounce_w,
+                sampled_level_ids=sampled_level_ids,
+                root_pos_w=root_pos_w,
+                root_quat_w=root_quat_w,
+                gravity_z=gravity_z,
+                desired_mode=desired_modes,
+            )
+        else:
+            target_mode, contact_lateral = self._infer_stroke_mode_from_launch_batch(
+                launch_pos_w=launch_pos_w,
+                launch_vel_w=launch_vel_w,
+                target_bounce_w=target_bounce_w,
+                root_pos_w=root_pos_w,
+                root_quat_w=root_quat_w,
+                gravity_z=gravity_z,
+            )
+
         ball_state = torch.zeros((env_ids.numel(), 13), device=self.device, dtype=torch.float32)
         ball_state[:, :3] = launch_pos_w
         ball_state[:, 3] = 1.0
@@ -83,16 +258,11 @@ class HighLevelTennisStateMixin:
         self.prev_net_dist[env_ids] = launch_net_dist
         self.net_dist[env_ids] = launch_net_dist
         self.net_dist_progress_buf[env_ids] = 0.0
-        if root_pos_w is None:
-            root_pos_w = self.asset.data.root_link_pos_w[env_ids]
-        if root_quat_w is None:
-            root_quat_w = self.asset.data.root_link_quat_w[env_ids]
-        self._set_stroke_mode_target_from_launch(
-            env_ids=env_ids,
-            target_bounce_w=target_bounce_w,
-            root_pos_w=root_pos_w,
-            root_quat_w=root_quat_w,
-        )
+        self.stroke_mode_target[env_ids] = target_mode
+        self.stroke_mode_contact_lateral[env_ids, 0] = contact_lateral
+        self.next_launch_desired_mode[env_ids] = desired_modes
+        self.sampled_stroke_mode_forehand_total += int((target_mode == self.STROKE_MODE_FOREHAND).sum().item())
+        self.sampled_stroke_mode_backhand_total += int((target_mode == self.STROKE_MODE_BACKHAND).sum().item())
 
     def _prime_ball_obs_history(self, env_ids: torch.Tensor) -> None:
         if env_ids.numel() == 0:
@@ -126,14 +296,25 @@ class HighLevelTennisStateMixin:
         self.fail_out[env_ids] = False
         self.fail_style[env_ids] = False
         self.fail_racket_body[env_ids] = False
+        self.fail_recover_timeout[env_ids] = False
         self.first_hit_step[env_ids] = self.max_task_steps
         self.first_bounce_step[env_ids] = self.max_task_steps
         self.hit_event[env_ids] = False
+        self.success_event[env_ids] = False
         self.bounce_event[env_ids] = False
         self.pass_net_event[env_ids] = False
         self.net_clearance_event[env_ids] = False
+        self.recover_zone_outer_enter_event[env_ids] = False
+        self.recover_zone_inner_enter_event[env_ids] = False
+        self.recover_zone_outer[env_ids] = False
+        self.recover_zone_inner[env_ids] = False
+        self.recover_zone_inner_hold_steps[env_ids] = 0
+        self.recover_zone_elapsed_steps[env_ids] = 0
+        self.recover_zone_outer_entered[env_ids] = False
+        self.recover_zone_inner_entered[env_ids] = False
         self.hit_stroke_mode_match_event[env_ids] = False
         self.hit_stroke_mode_mismatch_event[env_ids] = False
+        self.hit_used_forehand_event[env_ids] = False
         self.stroke_style_violation_event[env_ids] = False
         self.prehit_zone[env_ids] = False
         self.prehit_zone_event[env_ids] = False
@@ -192,6 +373,27 @@ class HighLevelTennisStateMixin:
             self._forward_dir_b[env_ids],
         )
         self.spawn_root_forward_xy[env_ids] = spawn_forward_w[:, :2]
+        # Fixed recovery target: no spawn noise.
+        env_origins = self.env.scene.env_origins[env_ids]
+        recover_pos_w = env_origins + self.robot_spawn_pos.unsqueeze(0)
+        recover_yaw = torch.full(
+            (env_ids.numel(),),
+            self.robot_spawn_yaw,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        half = 0.5 * recover_yaw
+        recover_quat_w = torch.stack(
+            [torch.cos(half), torch.zeros_like(half), torch.zeros_like(half), torch.sin(half)],
+            dim=-1,
+        )
+        self.recover_root_pos_w[env_ids] = recover_pos_w
+        self.recover_root_quat_w[env_ids] = recover_quat_w
+        recover_forward_w = quat_apply(
+            recover_quat_w,
+            self._forward_dir_b[env_ids],
+        )
+        self.recover_root_forward_xy[env_ids] = recover_forward_w[:, :2]
         self._write_ball_launch(env_ids, root_pos_w=spawn_pos_w, root_quat_w=spawn_quat_w)
         self._prev_racket_vel_w[env_ids] = 0.0
         self.prev_correction_action[env_ids] = 0.0

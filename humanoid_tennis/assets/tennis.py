@@ -8,8 +8,8 @@ from mjlab.entity import EntityCfg
 
 BALL_RADIUS = 0.0335
 BALL_MASS = 0.057
-COURT_HALF_WIDTH = 4.11
-COURT_HALF_LENGTH = 11.89
+COURT_HALF_WIDTH = 5.485
+COURT_HALF_LENGTH = 11.885
 NET_HEIGHT = 1.07
 # Ball receives collision from racket(2) and net(4). Ground contact is handled
 # via ball contype(16) against terrain conaffinity(17) in the scene.

@@ -140,6 +140,7 @@ class HighLevelTennisActionContactMixin:
             if nacon > 0:
                 contact_geom = self.env.sim.data.contact.geom[:nacon]
                 contact_world = self.env.sim.data.contact.worldid[:nacon].to(torch.long)
+                contact_dist = self.env.sim.data.contact.dist[:nacon]
                 g0 = contact_geom[:, 0]
                 g1 = contact_geom[:, 1]
                 r0 = torch.isin(g0, self.racket_contact_geom_ids)
@@ -147,6 +148,11 @@ class HighLevelTennisActionContactMixin:
                 b0 = torch.isin(g0, self.racket_body_contact_geom_ids)
                 b1 = torch.isin(g1, self.racket_body_contact_geom_ids)
                 contact_hit = (r0 & b1) | (r1 & b0)
+                min_penetration = float(self.racket_body_contact_min_penetration)
+                if min_penetration > 0.0:
+                    # MuJoCo contact.dist < 0 means penetration depth.
+                    penetration_hit = contact_dist <= (-min_penetration)
+                    contact_hit = contact_hit & penetration_hit
                 if contact_hit.any():
                     env_hit = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
                     env_ids = contact_world[contact_hit].clamp_(0, self.num_envs - 1)

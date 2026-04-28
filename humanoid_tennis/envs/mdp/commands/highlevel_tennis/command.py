@@ -29,6 +29,22 @@ class HighLevelTennisCommand(
     HighLevelTennisLaunchMixin,
     Command,
 ):
+    # Fixed racket-face convention for G1 racket asset:
+    # local -Y is face normal, and forehand uses negative face axis.
+    RACKET_FACE_AXIS_LOCAL = (0.0, -1.0, 0.0)
+    FOREHAND_USES_NEGATIVE_FACE_AXIS = True
+    RACKET_BODY_NAME = "tennis_racket_mount"
+    RACKET_CENTER_OFFSET = (0.1025, -0.004, 0.4)
+    USE_RACKET_BODY_CONTACT_SENSOR = False
+    ENABLE_RACKET_BODY_DIRECT_CONTACT_GUARD = True
+    RACKET_BODY_CONTACT_MIN_PENETRATION = 0.01
+    STROKE_MODE_LATERAL_DEADZONE = 0.12
+    BALANCE_STROKE_MODE_SAMPLING = True
+    BALANCE_STROKE_MODE_MAX_RESAMPLE_ROUNDS = 12
+    FAIL_ON_WRONG_BOUNCE_SIDE = True
+    POST_HIT_FORWARD_DIR_GRACE_STEPS = 10
+    POST_HIT_MIN_FORWARD_SPEED = 1.0
+
     def __init__(
         self,
         env,
@@ -66,6 +82,12 @@ class HighLevelTennisCommand(
         self.relaunch_on_success = bool(episode_cfg.relaunch_on_success)
         self.launch_interval_s = max(float(episode_cfg.launch_interval_s), 0.0)
         self.launch_interval_steps = int(round(self.launch_interval_s / float(self.env.step_dt)))
+        self.relaunch_require_recovery = bool(episode_cfg.relaunch_require_recovery)
+        self.relaunch_recovery_hold_steps = max(1, int(episode_cfg.relaunch_recovery_hold_steps))
+        self.relaunch_recovery_timeout_steps = max(
+            self.relaunch_recovery_hold_steps,
+            int(round(max(float(episode_cfg.relaunch_recovery_timeout_s), 0.0) / float(self.env.step_dt))),
+        )
         self.highlevel_latent_dim = int(cfg.highlevel_latent_dim)
         self.ball_obs_history_steps = tuple(int(s) for s in cfg.ball_obs_history_steps)
         if len(self.ball_obs_history_steps) == 0:
@@ -85,17 +107,18 @@ class HighLevelTennisCommand(
         self.stroke_style_min_racket_speed = float(cfg.stroke_style_min_racket_speed)
         self.stroke_style_min_forward_speed = float(cfg.stroke_style_min_forward_speed)
         self.post_hit_clean_bonus_window_steps = max(1, int(cfg.post_hit_clean_bonus_window_steps))
-        self.post_hit_recovery_window_steps = max(1, int(cfg.post_hit_recovery_window_steps))
         self.post_hit_stability_window_steps = max(1, int(cfg.post_hit_stability_window_steps))
+        self.recovery_outer_xy_radius = max(float(cfg.recovery_outer_xy_radius), 0.05)
+        self.recovery_inner_xy_radius = max(float(cfg.recovery_inner_xy_radius), 0.05)
+        self.recovery_outer_heading_cos = min(max(float(cfg.recovery_outer_heading_cos), -1.0), 1.0)
+        self.recovery_inner_heading_cos = min(max(float(cfg.recovery_inner_heading_cos), -1.0), 1.0)
         self.recovery_upper_joint_patterns = tuple(str(p) for p in cfg.recovery_upper_joint_patterns)
-        self.stroke_mode_lateral_deadzone = max(0.0, float(cfg.stroke_mode_lateral_deadzone))
-        face_axis_local = torch.tensor(cfg.racket_face_axis_local, device=self.device, dtype=torch.float32)
-        if face_axis_local.numel() != 3:
-            raise ValueError(
-                f"racket_face_axis_local must have length 3, got shape={tuple(face_axis_local.shape)}"
-            )
+        self.stroke_mode_lateral_deadzone = max(0.0, float(self.STROKE_MODE_LATERAL_DEADZONE))
+        face_axis_local = torch.tensor(self.RACKET_FACE_AXIS_LOCAL, device=self.device, dtype=torch.float32)
         self.racket_face_axis_local = face_axis_local / face_axis_local.norm().clamp_min(1.0e-6)
-        self.forehand_uses_negative_face_axis = bool(cfg.forehand_uses_negative_face_axis)
+        self.forehand_uses_negative_face_axis = bool(self.FOREHAND_USES_NEGATIVE_FACE_AXIS)
+        self.balance_stroke_mode_sampling = bool(self.BALANCE_STROKE_MODE_SAMPLING)
+        self.balance_stroke_mode_max_resample_rounds = max(0, int(self.BALANCE_STROKE_MODE_MAX_RESAMPLE_ROUNDS))
         self.STROKE_MODE_NEUTRAL = 0
         self.STROKE_MODE_FOREHAND = 1
         self.STROKE_MODE_BACKHAND = 2
@@ -168,16 +191,20 @@ class HighLevelTennisCommand(
 
         self.outgoing_speed_minmax = torch.tensor(cfg.outgoing_speed_minmax, device=self.device, dtype=torch.float32)
 
-        racket_body_name = str(cfg.racket_body_name)
+        racket_body_name = str(self.RACKET_BODY_NAME)
         racket_body_ids, racket_names = self.asset.find_bodies(racket_body_name)
         if len(racket_body_ids) != 1:
             raise ValueError(
                 f"Expected exactly one racket body from '{racket_body_name}', got {racket_names}."
             )
         self.racket_body_id = int(racket_body_ids[0])
-        self.racket_center_offset = torch.tensor(cfg.racket_center_offset, device=self.device, dtype=torch.float32)
-        self.use_racket_body_contact_sensor = bool(cfg.use_racket_body_contact_sensor)
-        self.enable_racket_body_direct_contact_guard = bool(cfg.enable_racket_body_direct_contact_guard)
+        self.racket_center_offset = torch.tensor(self.RACKET_CENTER_OFFSET, device=self.device, dtype=torch.float32)
+        self.use_racket_body_contact_sensor = bool(self.USE_RACKET_BODY_CONTACT_SENSOR)
+        self.enable_racket_body_direct_contact_guard = bool(self.ENABLE_RACKET_BODY_DIRECT_CONTACT_GUARD)
+        self.racket_body_contact_min_penetration = max(0.0, float(self.RACKET_BODY_CONTACT_MIN_PENETRATION))
+        self.fail_on_wrong_bounce_side = bool(self.FAIL_ON_WRONG_BOUNCE_SIDE)
+        self.post_hit_forward_dir_grace_steps = max(0, int(self.POST_HIT_FORWARD_DIR_GRACE_STEPS))
+        self.post_hit_min_forward_speed = float(self.POST_HIT_MIN_FORWARD_SPEED)
         self.contact_sensors = ContactSensorHandles.from_scene(self.env.scene)
 
         self.racket_contact_geom_ids = torch.zeros((0,), dtype=torch.int32, device=self.device)
@@ -187,22 +214,56 @@ class HighLevelTennisCommand(
             raise ValueError(
                 f"Racket collision geom not found for robot. matched={racket_geom_names}"
             )
-        self.racket_contact_geom_ids = torch.tensor(
-            [int(v) for v in racket_geom_ids], dtype=torch.int32, device=self.device
-        )
         body_geom_ids, body_geom_names = self.asset.find_geoms(".*_collision")
-        body_ids_kept: list[int] = []
-        for gid, gname in zip(body_geom_ids, body_geom_names):
-            name = str(gname)
-            if name == "tennis_racket_collision":
+
+        # Build direct-contact guard geom sets in global MuJoCo geom-id space.
+        # This avoids id-space mismatch between entity-local geom ids and
+        # contact.geom ids in vectorized worlds.
+        model_racket_ids: list[int] = []
+        model_body_ids: list[int] = []
+        ngeom = int(getattr(self.env.sim.mj_model, "ngeom", 0))
+        for gid in range(ngeom):
+            try:
+                full_name = str(self.env.sim.mj_model.geom(gid).name or "")
+            except Exception:
                 continue
-            # Exclude only mounting hand, keep all other body parts.
-            if name == "right_hand_collision":
+            if len(full_name) == 0 or (not full_name.startswith("robot/")):
                 continue
-            body_ids_kept.append(int(gid))
-        if len(body_ids_kept) > 0:
+            base_name = full_name.split("/")[-1]
+            if base_name == "tennis_racket_collision":
+                model_racket_ids.append(gid)
+                continue
+            if not base_name.endswith("_collision"):
+                continue
+            # Exclude only mounting hand, keep all other robot body parts.
+            if base_name == "right_hand_collision":
+                continue
+            model_body_ids.append(gid)
+
+        if len(model_racket_ids) == 0:
+            # Fallback to entity query result when model name scan is unavailable.
+            model_racket_ids = [int(v) for v in racket_geom_ids]
+
+        if len(model_body_ids) == 0:
+            # Fallback to entity query result when model name scan is unavailable.
+            for gid, gname in zip(body_geom_ids, body_geom_names):
+                name = str(gname)
+                if name == "tennis_racket_collision":
+                    continue
+                if name == "right_hand_collision":
+                    continue
+                model_body_ids.append(int(gid))
+
+        self.racket_contact_geom_ids = torch.tensor(
+            sorted(set(model_racket_ids)),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        if len(model_body_ids) > 0:
             self.racket_body_contact_geom_ids = torch.tensor(
-                body_ids_kept, dtype=torch.int32, device=self.device
+                sorted(set(model_body_ids)),
+                dtype=torch.int32,
+                device=self.device,
             )
 
         ball_body_ids, _ = self.ball.find_bodies("tennis_ball")
@@ -218,6 +279,11 @@ class HighLevelTennisCommand(
         self.spawn_root_quat_w = torch.zeros((self.num_envs, 4), dtype=torch.float32, device=self.device)
         self.spawn_root_quat_w[:, 0] = 1.0
         self.spawn_root_forward_xy = torch.zeros((self.num_envs, 2), dtype=torch.float32, device=self.device)
+        # Recovery target is fixed (noise-free) spawn pose: env_origin + configured spawn/yaw.
+        self.recover_root_pos_w = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        self.recover_root_quat_w = torch.zeros((self.num_envs, 4), dtype=torch.float32, device=self.device)
+        self.recover_root_quat_w[:, 0] = 1.0
+        self.recover_root_forward_xy = torch.zeros((self.num_envs, 2), dtype=torch.float32, device=self.device)
 
         self.task_step = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
         self.finished = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -238,6 +304,7 @@ class HighLevelTennisCommand(
         self.fail_out = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.fail_style = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.fail_racket_body = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.fail_recover_timeout = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.first_hit_step = torch.full(
             (self.num_envs,), self.max_task_steps, dtype=torch.int32, device=self.device
         )
@@ -246,11 +313,21 @@ class HighLevelTennisCommand(
         )
 
         self.hit_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.success_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.bounce_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.pass_net_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.net_clearance_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.recover_zone_outer_enter_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.recover_zone_inner_enter_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.recover_zone_outer = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.recover_zone_inner = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.recover_zone_inner_hold_steps = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        self.recover_zone_elapsed_steps = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        self.recover_zone_outer_entered = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.recover_zone_inner_entered = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.hit_stroke_mode_match_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.hit_stroke_mode_mismatch_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.hit_used_forehand_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.racket_ball_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.ball_net_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.ball_court_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -286,6 +363,13 @@ class HighLevelTennisCommand(
         self.launch_level_ids = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
         self.stroke_mode_target = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.stroke_mode_contact_lateral = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.float32)
+        self.last_hit_stroke_mode = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self.next_launch_desired_mode = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self.hit_used_forehand_total = 0
+        self.hit_used_backhand_total = 0
+        self.best_consecutive_return_total = 0
+        self.sampled_stroke_mode_forehand_total = 0
+        self.sampled_stroke_mode_backhand_total = 0
         self.bounce_pos_w = torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
         self.prev_ball_target_dist = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.float32)
         self.ball_target_dist = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.float32)

@@ -56,6 +56,9 @@ class EpisodeConfig:
     max_consecutive_returns_before_finish: int = 8
     relaunch_on_success: bool = True
     launch_interval_s: float = 2.0
+    relaunch_require_recovery: bool = True
+    relaunch_recovery_hold_steps: int = 8
+    relaunch_recovery_timeout_s: float = 2.5
 
 
 @dataclass
@@ -116,8 +119,11 @@ class HighLevelTennisConfig:
     stroke_style_min_racket_speed: float = 2.5
     stroke_style_min_forward_speed: float = 0.2
     post_hit_clean_bonus_window_steps: int = 32
-    post_hit_recovery_window_steps: int = 32
     post_hit_stability_window_steps: int = 24
+    recovery_outer_xy_radius: float = 1.10
+    recovery_inner_xy_radius: float = 0.60
+    recovery_outer_heading_cos: float = 0.65
+    recovery_inner_heading_cos: float = 0.82
     recovery_upper_joint_patterns: tuple[str, ...] = (
         "waist_.*_joint",
         ".*_shoulder_.*_joint",
@@ -133,17 +139,6 @@ class HighLevelTennisConfig:
     lift_spin_scale: float = 5.0
     spin_damping_coef: float = 0.003
 
-    racket_body_name: str = "tennis_racket_mount"
-    racket_center_offset: tuple[float, float, float] = (0.1025, -0.004, 0.4)
-    # Side-aware stroke target is frozen at launch time from predicted contact lateral
-    # offset in launch-time root frame.
-    stroke_mode_lateral_deadzone: float = 0.12
-    # Racket face axis in racket-body local frame; replay tool uses +axis(red), -axis(blue).
-    # With forehand_uses_negative_face_axis=True, blue face is treated as forehand.
-    racket_face_axis_local: tuple[float, float, float] = (0.0, 0.0, 1.0)
-    forehand_uses_negative_face_axis: bool = True
-    use_racket_body_contact_sensor: bool = False
-    enable_racket_body_direct_contact_guard: bool = True
     outgoing_speed_minmax: tuple[float, float] = (8.0, 26.0)
 
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)

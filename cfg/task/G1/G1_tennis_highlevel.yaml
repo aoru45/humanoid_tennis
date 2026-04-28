@@ -45,19 +45,20 @@ command:
     ball_obs_history_steps: [0, 1, 2, 3, 4]
     wrist_joint_patterns: [right_wrist_.*_joint]
     post_hit_clean_bonus_window_steps: 32
-    post_hit_recovery_window_steps: 32
     post_hit_stability_window_steps: 24
+    recovery_outer_xy_radius: 1.10
+    recovery_inner_xy_radius: 0.60
+    recovery_outer_heading_cos: 0.65
+    recovery_inner_heading_cos: 0.82
     recovery_upper_joint_patterns: [waist_.*_joint, .*_shoulder_.*_joint, .*_elbow_joint, .*_wrist_.*_joint]
-    stroke_mode_lateral_deadzone: 0.12
-    racket_face_axis_local: [0.0, 0.0, 1.0]
-    forehand_uses_negative_face_axis: true
-    use_racket_body_contact_sensor: false
-    enable_racket_body_direct_contact_guard: true
     episode:
       max_task_steps: 500
       max_consecutive_returns_before_finish: 8
       relaunch_on_success: true
       launch_interval_s: 2.0
+      relaunch_require_recovery: true
+      relaunch_recovery_hold_steps: 8
+      relaunch_recovery_timeout_s: 2.5
     spawn:
       pos: [0.0, -10, 0.81]
       yaw: 1.5707963267948966
@@ -148,10 +149,13 @@ reward:
     stroke_mode_match_on_hit: {weight: 80.0}
     stroke_mode_mismatch_on_hit: {weight: -120.0}
     post_hit_clean_bonus: {weight: 3.5}
-    post_hit_recover_root_xy: {weight: 5.0, sigma: [0.35, 0.70]}
+    post_hit_recover_root_xy: {weight: 9.0, sigma: [0.35, 0.70]}
     post_hit_recover_heading: {weight: 3.0, sigma: [0.20, 0.45]}
     post_hit_recover_upper_pose: {weight: 4.0, sigma: [0.06, 0.14]}
-    post_hit_alive_no_racket_body_contact: {weight: 2.5}
+    post_hit_alive_no_racket_body_contact: {weight: 1.2}
+    post_hit_recover_zone_outer_enter: {weight: 18.0}
+    post_hit_recover_zone_inner_enter: {weight: 28.0}
+    success_streak_bonus: {weight: 45.0, streak_cap: 8, streak_power: 1.7}
     hit_contact_height: {weight: 24.0, target_height: 1.22, sigma: 0.12, min_height: 1.00}
     enter_hitting_zone: {weight: 18.0}
     pass_net: {weight: 140.0}
@@ -187,6 +191,7 @@ reward:
     episode_stroke_style_violation: {weight: -50.0}
     episode_fail_racket_body_pre_hit: {weight: -80.0}
     episode_fail_racket_body_post_hit: {weight: -320.0}
+    episode_fail_recover_timeout: {weight: -260.0}
 
 randomization: {}
 
@@ -196,7 +201,13 @@ termination:
   ball_out_of_bounds_termination: {}
   stroke_style_violation_termination: {}
   racket_body_contact_termination: {}
+  recover_timeout_termination: {}
   fall_over: {xy_thres: 0.90, z_thres: 0.40}
+
+sim:
+  # Physical spacing used to place per-env origins in simulation.
+  # Keep this compact for numerical stability with large num_envs.
+  env_spacing: 6.0
 
 viewer:
   env_spacing: 30.0

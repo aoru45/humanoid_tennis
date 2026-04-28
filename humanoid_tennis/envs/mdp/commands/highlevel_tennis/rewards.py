@@ -26,16 +26,37 @@ class HighLevelTennisRewardMixin:
             & (steps_since_hit <= int(window_steps))
         )
 
+    def _post_hit_recovery_mask(self) -> torch.Tensor:
+        # Keep recovery shaping active from the first hit until the next rally is launched.
+        # `_reset_rally_state()` clears `has_hit` right before the next serve is written.
+        return self.has_hit & (self.first_hit_step < self.max_task_steps)
+
     def _incoming_bounce_target_xy(
         self,
         ball_pos_w: torch.Tensor,
         ball_vel_w: torch.Tensor,
+        gravity_z: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return ballistic predicted incoming-bounce target and predicted bounce time."""
+        if gravity_z is None:
+            gravity_z = self.gravity
+        if gravity_z.ndim == 1:
+            gravity_z = gravity_z.unsqueeze(-1)
+        if gravity_z.shape[0] != ball_pos_w.shape[0]:
+            if gravity_z.numel() == 1:
+                gravity_z = gravity_z.reshape(1, 1).expand(ball_pos_w.shape[0], 1)
+            else:
+                g_val = float(gravity_z.reshape(-1)[0].detach().cpu().item())
+                gravity_z = torch.full(
+                    (ball_pos_w.shape[0], 1),
+                    g_val,
+                    device=ball_pos_w.device,
+                    dtype=ball_pos_w.dtype,
+                )
         pred_bounce_xy, pred_bounce_t = self._predict_first_bounce_ballistic(
             launch_pos=ball_pos_w,
             vel=ball_vel_w,
-            gravity_z=self.gravity,
+            gravity_z=gravity_z,
         )
         return pred_bounce_xy, pred_bounce_t
 
@@ -43,13 +64,31 @@ class HighLevelTennisRewardMixin:
         self,
         ball_pos_w: torch.Tensor,
         ball_vel_w: torch.Tensor,
+        gravity_z: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Predict a fixed pre-hit contact target based on the ball trajectory crossing a fixed height (e.g. z=1.0m)."""
-        target_bounce_xy, pred_bounce_t = self._incoming_bounce_target_xy(ball_pos_w, ball_vel_w)
+        target_bounce_xy, pred_bounce_t = self._incoming_bounce_target_xy(
+            ball_pos_w, ball_vel_w, gravity_z=gravity_z
+        )
         
         # Calculate time to reach target_height (e.g., 1.0m)
         target_height = 1.0
-        gravity_z = self.gravity.squeeze(-1)
+        if gravity_z is None:
+            gravity_z = self.gravity
+        if gravity_z.ndim == 1:
+            gravity_z = gravity_z.unsqueeze(-1)
+        if gravity_z.shape[0] != ball_pos_w.shape[0]:
+            if gravity_z.numel() == 1:
+                gravity_z = gravity_z.reshape(1, 1).expand(ball_pos_w.shape[0], 1)
+            else:
+                g_val = float(gravity_z.reshape(-1)[0].detach().cpu().item())
+                gravity_z = torch.full(
+                    (ball_pos_w.shape[0], 1),
+                    g_val,
+                    device=ball_pos_w.device,
+                    dtype=ball_pos_w.dtype,
+                )
+        gravity_z = gravity_z.squeeze(-1)
         
         # We need to solve: z0 + vz*t + 0.5*g*t^2 = target_height
         # 0.5*g*t^2 + vz*t + (z0 - target_height) = 0
@@ -276,9 +315,10 @@ class HighLevelTennisRewardMixin:
         proximity = (1.0 - dist / float(dist_threshold)).clamp_min(0.0)
         _, contact_t, contact_valid, _, _ = self._incoming_contact_target(ball_pos_w, self.ball.data.root_link_lin_vel_w)
         
-        # Get racket normal direction (assuming Z axis of racket body is the face normal)
+        # Use the same fixed racket face axis as runtime stroke-mode logic.
         body_quat_w = self.asset.data.body_link_quat_w[:, self.racket_body_id]
-        racket_normal = quat_apply(body_quat_w, torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(self.num_envs, -1))
+        racket_face_axis = self.racket_face_axis_local.unsqueeze(0).expand(self.num_envs, -1)
+        racket_normal = quat_apply(body_quat_w, racket_face_axis)
         
         # Desired direction uses XY only (court plane). This avoids encouraging downward "shovel" orientation
         # caused by aiming directly at the ground bounce point in 3D.
@@ -358,11 +398,9 @@ class HighLevelTennisRewardMixin:
         self,
         sigma: Sequence[float] | None = (0.35, 0.70),
     ):
-        active = (
-            self._post_hit_window_mask(self.post_hit_recovery_window_steps) & (~self.finished)
-        ).float().unsqueeze(-1)
+        active = (self._post_hit_recovery_mask() & (~self.finished)).float().unsqueeze(-1)
         root_xy_err = (
-            self.asset.data.root_link_pos_w[:, :2] - self.spawn_root_pos_w[:, :2]
+            self.asset.data.root_link_pos_w[:, :2] - self.recover_root_pos_w[:, :2]
         ).norm(dim=-1, keepdim=True)
         return _exp_reward(root_xy_err, sigma) * active
 
@@ -371,14 +409,12 @@ class HighLevelTennisRewardMixin:
         self,
         sigma: Sequence[float] | None = (0.20, 0.45),
     ):
-        active = (
-            self._post_hit_window_mask(self.post_hit_recovery_window_steps) & (~self.finished)
-        ).float().unsqueeze(-1)
+        active = (self._post_hit_recovery_mask() & (~self.finished)).float().unsqueeze(-1)
         root_quat_w = self.asset.data.root_link_quat_w
         root_forward_w = quat_apply(root_quat_w, self._forward_dir_b)
         root_forward_xy = root_forward_w[:, :2]
         root_forward_xy = root_forward_xy / root_forward_xy.norm(dim=-1, keepdim=True).clamp_min(1.0e-6)
-        target_forward_xy = self.spawn_root_forward_xy / self.spawn_root_forward_xy.norm(
+        target_forward_xy = self.recover_root_forward_xy / self.recover_root_forward_xy.norm(
             dim=-1, keepdim=True
         ).clamp_min(1.0e-6)
         heading_err = (root_forward_xy - target_forward_xy).norm(dim=-1, keepdim=True)
@@ -391,9 +427,7 @@ class HighLevelTennisRewardMixin:
     ):
         if self.recovery_upper_joint_ids_asset.numel() == 0:
             return torch.zeros((self.num_envs, 1), dtype=torch.float32, device=self.device)
-        active = (
-            self._post_hit_window_mask(self.post_hit_recovery_window_steps) & (~self.finished)
-        ).float().unsqueeze(-1)
+        active = (self._post_hit_recovery_mask() & (~self.finished)).float().unsqueeze(-1)
         joint_pos = self.asset.data.joint_pos[:, self.recovery_upper_joint_ids_asset]
         joint_ref = self.root_default_joint_pos[:, self.recovery_upper_joint_ids_asset]
         pose_err = (joint_pos - joint_ref).norm(dim=-1, keepdim=True)
@@ -401,9 +435,25 @@ class HighLevelTennisRewardMixin:
 
     @reward
     def post_hit_alive_no_racket_body_contact(self):
-        active = self._post_hit_window_mask(self.post_hit_recovery_window_steps)
+        active = self._post_hit_recovery_mask()
         alive = active & (~self.racket_body_contact) & (~self.fail_racket_body) & (~self.finished)
         return alive.float().unsqueeze(-1)
+
+    @reward
+    def post_hit_recover_zone_outer_enter(self):
+        return self.recover_zone_outer_enter_event.float().unsqueeze(-1)
+
+    @reward
+    def post_hit_recover_zone_inner_enter(self):
+        return self.recover_zone_inner_enter_event.float().unsqueeze(-1)
+
+    @reward
+    def success_streak_bonus(self, streak_cap: int = 8, streak_power: float = 1.7):
+        cap = max(1, int(streak_cap))
+        power = max(1.0, float(streak_power))
+        streak = self.consecutive_return_count.float().clamp(1.0, float(cap)) / float(cap)
+        streak = streak.pow(power)
+        return self.success_event.float().unsqueeze(-1) * streak.unsqueeze(-1)
 
     @reward
     def post_hit_wrist_torque_guard(self):
@@ -749,6 +799,10 @@ class HighLevelTennisRewardMixin:
     @reward
     def episode_fail_racket_body_post_hit(self):
         return (self.finished & self.fail_racket_body & self.has_hit).float().unsqueeze(-1)
+
+    @reward
+    def episode_fail_recover_timeout(self):
+        return (self.finished & self.fail_recover_timeout).float().unsqueeze(-1)
 
     @reward
     def episode_has_hit(self):

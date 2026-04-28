@@ -9,7 +9,6 @@ task:
 algo:
   in_keys: [policy, pulse_policy, priv, priv_critic]
   symmetry_enabled: false
-  train_every: 8
   init_noise_scale: 0.30
   entropy_coef_start: 0.012
   entropy_coef_end: 0.0005

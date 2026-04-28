@@ -1,5 +1,7 @@
 import argparse
+import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +10,7 @@ import torch
 from scipy.spatial.transform import Rotation as sRot
 
 from humanoid_tennis.assets import get_robot_cfg
+from humanoid_tennis.utils.motion import MotionDataset
 
 
 def _read_scalar(npz, key: str, default: float) -> float:
@@ -58,7 +61,15 @@ def _angvel_from_quat_wxyz(quat_wxyz: np.ndarray, fps: float) -> np.ndarray:
     return w
 
 
-def _load_motion(npz_path: str):
+@dataclass(frozen=True)
+class _ReplaySource:
+    kind: str  # "npz" | "memmap"
+    path: Path
+    segment_idx: int | None = None
+    label: str = ""
+
+
+def _load_motion_npz(npz_path: str):
     with np.load(npz_path, allow_pickle=True) as data:
         keys = set(data.files)
 
@@ -112,7 +123,43 @@ def _load_motion(npz_path: str):
     return qpos, qvel, fps
 
 
-def _resolve_motion_files(motion_arg: str, recursive: bool) -> tuple[list[Path], Path]:
+def _is_memmap_motion_dir(path: Path) -> bool:
+    return path.is_dir() and (path / "meta_motion.json").is_file() and (path / "_tensordict").is_dir()
+
+
+def _load_memmap_index(mem_path: Path) -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    meta_path = mem_path / "meta_motion.json"
+    with meta_path.open("r", encoding="utf-8") as f:
+        meta = json.load(f)
+    starts = np.asarray(meta.get("starts", []), dtype=np.int64)
+    ends = np.asarray(meta.get("ends", []), dtype=np.int64)
+    if starts.size == 0 or ends.size == 0 or starts.shape != ends.shape:
+        raise ValueError(f"Invalid starts/ends in {meta_path}")
+    id_labels: list[dict] = []
+    label_path = mem_path / "id_label.json"
+    if label_path.is_file():
+        try:
+            with label_path.open("r", encoding="utf-8") as f:
+                id_labels = list(json.load(f))
+        except Exception:
+            id_labels = []
+    return starts, ends, id_labels
+
+
+def _build_memmap_source_label(mem_path: Path, segment_idx: int, id_labels: list[dict]) -> str:
+    if 0 <= segment_idx < len(id_labels):
+        item = id_labels[segment_idx]
+        src = str(item.get("source_path", ""))
+        seg_s = item.get("segment_start", None)
+        seg_e = item.get("segment_end", None)
+        stem = Path(src).stem if src else f"segment_{segment_idx:05d}"
+        if seg_s is not None and seg_e is not None:
+            return f"{stem}[{int(seg_s)}:{int(seg_e)}]#{segment_idx:05d}"
+        return f"{stem}#{segment_idx:05d}"
+    return f"{mem_path.name}/segment_{segment_idx:05d}"
+
+
+def _resolve_motion_sources(motion_arg: str, recursive: bool) -> tuple[list[_ReplaySource], Path]:
     motion_path = Path(motion_arg).expanduser()
     if not motion_path.is_absolute():
         motion_path = (Path.cwd() / motion_path).resolve()
@@ -122,32 +169,112 @@ def _resolve_motion_files(motion_arg: str, recursive: bool) -> tuple[list[Path],
     if motion_path.is_file():
         if motion_path.suffix.lower() != ".npz":
             raise ValueError(f"Expected a .npz file, got: {motion_path}")
-        return [motion_path], motion_path.parent
+        return [
+            _ReplaySource(kind="npz", path=motion_path, segment_idx=None, label=motion_path.name)
+        ], motion_path.parent
 
     if not motion_path.is_dir():
         raise ValueError(f"Unsupported motion path type: {motion_path}")
 
+    if _is_memmap_motion_dir(motion_path):
+        starts, ends, id_labels = _load_memmap_index(motion_path)
+        sources: list[_ReplaySource] = []
+        for seg_idx in range(int(starts.shape[0])):
+            label = _build_memmap_source_label(motion_path, seg_idx, id_labels)
+            sources.append(
+                _ReplaySource(
+                    kind="memmap",
+                    path=motion_path,
+                    segment_idx=int(seg_idx),
+                    label=label,
+                )
+            )
+        if not sources:
+            raise RuntimeError(f"No segments found in memmap dataset: {motion_path}")
+        return sources, motion_path
+
     pattern = "**/*.npz" if recursive else "*.npz"
     files = sorted(p for p in motion_path.glob(pattern) if p.is_file())
     if not files:
-        raise RuntimeError(f"No .npz files found in directory: {motion_path}")
-    return files, motion_path
+        raise RuntimeError(
+            f"No .npz files found in directory: {motion_path}. "
+            "If this is a memmap dataset, ensure it contains meta_motion.json and _tensordict/."
+        )
+    return [
+        _ReplaySource(kind="npz", path=p, segment_idx=None, label=str(p.relative_to(motion_path)))
+        for p in files
+    ], motion_path
+
+
+def _load_motion_memmap_segment(
+    mem_path: Path,
+    *,
+    segment_idx: int,
+    mem_fps: float,
+    mem_cache: dict[str, object],
+):
+    cache_key = str(mem_path)
+    cache = mem_cache.get(cache_key, None)
+    if cache is None:
+        ds = MotionDataset.create_from_path_lazy(mem_path=str(mem_path), device=torch.device("cpu"))
+        starts, ends, _ = _load_memmap_index(mem_path)
+        cache = {"ds": ds, "starts": starts, "ends": ends}
+        mem_cache[cache_key] = cache
+
+    starts = cache["starts"]
+    ends = cache["ends"]
+    if segment_idx < 0 or segment_idx >= int(starts.shape[0]):
+        raise IndexError(f"segment_idx out of range: {segment_idx} (num_segments={int(starts.shape[0])})")
+    s = int(starts[segment_idx])
+    e = int(ends[segment_idx])
+    if s >= e:
+        raise ValueError(f"Empty segment for idx={segment_idx}: start={s}, end={e}")
+
+    ds = cache["ds"]
+    root_pos = ds.data.root_pos_w[s:e].to(dtype=torch.float32).cpu().numpy()
+    root_quat_w = ds.data.root_quat_w[s:e].to(dtype=torch.float32).cpu().numpy()
+    joint_pos = ds.data.joint_pos[s:e].to(dtype=torch.float32).cpu().numpy()
+
+    fps = max(float(mem_fps), 1.0e-6)
+    root_lin_vel = _finite_diff(root_pos, dt=1.0 / fps)
+    root_ang_vel = _angvel_from_quat_wxyz(root_quat_w, fps=fps)
+    joint_vel = _finite_diff(joint_pos, dt=1.0 / fps)
+
+    qpos = np.concatenate([root_pos, root_quat_w, joint_pos], axis=-1).astype(np.float32)
+    qvel = np.concatenate([root_lin_vel, root_ang_vel, joint_vel], axis=-1).astype(np.float32)
+    return qpos, qvel, fps
 
 
 def _prepare_clip(
-    npz_path: Path,
+    source: _ReplaySource,
     *,
     start: int,
     end: int | None,
     speed: float,
+    mem_fps: float,
+    mem_cache: dict[str, object],
 ) -> tuple[np.ndarray, np.ndarray, float, float, int, int, int]:
-    qpos, qvel, fps = _load_motion(str(npz_path))
+    if source.kind == "npz":
+        qpos, qvel, fps = _load_motion_npz(str(source.path))
+    elif source.kind == "memmap":
+        if source.segment_idx is None:
+            raise ValueError(f"memmap source missing segment_idx: {source}")
+        qpos, qvel, fps = _load_motion_memmap_segment(
+            source.path,
+            segment_idx=int(source.segment_idx),
+            mem_fps=float(mem_fps),
+            mem_cache=mem_cache,
+        )
+    else:
+        raise ValueError(f"Unsupported source kind: {source.kind}")
+
     total = qpos.shape[0]
     start_idx = max(0, int(start))
     end_idx = total if end is None else min(total, int(end))
     if start_idx >= end_idx:
         raise ValueError(
-            f"Invalid frame range for {npz_path.name}: start={start_idx}, end={end_idx}, total={total}"
+            f"Invalid frame range for {source.label or source.path.name}: "
+            f"start={start_idx}, end={end_idx}, total={total}"
         )
 
     qpos_clip = qpos[start_idx:end_idx]
@@ -219,8 +346,8 @@ def _to_cpu_wp_data(wp_data):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Replay motion npz with Viser.")
-    parser.add_argument("motion", type=str, help="Path to a motion npz file, or a directory containing npz files.")
+    parser = argparse.ArgumentParser(description="Replay motion (npz or memmap dataset) with Viser.")
+    parser.add_argument("motion", type=str, help="Path to a motion npz file, npz directory, or memmap dataset directory.")
     parser.add_argument("--robot", type=str, default="g1_col_full_self", help="Robot config name.")
     parser.add_argument("--device", type=str, default=None, help="Simulation device, e.g. cuda:0 or cpu.")
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier.")
@@ -241,14 +368,20 @@ def main():
         default=False,
         help="When motion is a directory, recursively scan subdirectories for *.npz.",
     )
+    parser.add_argument(
+        "--memmap-fps",
+        type=float,
+        default=50.0,
+        help="FPS to use when replaying memmap dataset segments (meta has no fps).",
+    )
     args = parser.parse_args()
 
     if args.speed <= 0:
         raise ValueError("--speed must be > 0.")
 
-    motion_files, motion_root = _resolve_motion_files(args.motion, recursive=bool(args.recursive))
-    if len(motion_files) > 1:
-        print(f"[INFO] Directory mode: found {len(motion_files)} npz files under {motion_root}")
+    motion_sources, motion_root = _resolve_motion_sources(args.motion, recursive=bool(args.recursive))
+    if len(motion_sources) > 1:
+        print(f"[INFO] Directory mode: found {len(motion_sources)} clips under {motion_root}")
 
     device = args.device
     if device is None:
@@ -264,16 +397,13 @@ def main():
     sim_nv = int(sim.data.qvel.shape[-1])
     viewer, viser_scene = _create_viewer(sim)
 
+    mem_cache: dict[str, object] = {}
     motion_labels = []
     label_to_index: dict[str, int] = {}
-    for idx, path in enumerate(motion_files):
-        if len(motion_files) == 1:
-            label = path.name
-        else:
-            try:
-                label = str(path.relative_to(motion_root))
-            except ValueError:
-                label = path.name
+    for idx, src in enumerate(motion_sources):
+        label = src.label
+        if len(label) == 0:
+            label = src.path.name
         if label in label_to_index:
             label = f"{label}#{idx}"
         motion_labels.append(label)
@@ -294,22 +424,24 @@ def main():
 
     def _load_motion_by_index(target_idx: int, reason: str) -> bool:
         nonlocal current_idx, qpos, qvel, fps, frame_dt, steps, start_idx, end_idx, frame_idx, start_time, hold_last_frame, viewer_step_interval
-        path = motion_files[target_idx]
+        src = motion_sources[target_idx]
         try:
             qpos_new, qvel_new, fps_new, frame_dt_new, start_new, end_new, _total_new = _prepare_clip(
-                path,
+                src,
                 start=args.start,
                 end=args.end,
                 speed=float(args.speed),
+                mem_fps=float(args.memmap_fps),
+                mem_cache=mem_cache,
             )
         except Exception as exc:
-            print(f"[WARN] Failed to load {path}: {exc}")
+            print(f"[WARN] Failed to load {src.path}: {exc}")
             return False
 
         if qpos_new.shape[-1] != sim_nq or qvel_new.shape[-1] != sim_nv:
             print(
-                f"[WARN] Skip {path.name}: qpos/qvel dim ({qpos_new.shape[-1]}/{qvel_new.shape[-1]}) "
-                f"!= sim ({sim_nq}/{sim_nv})."
+                f"[WARN] Skip {src.label or src.path.name}: qpos/qvel dim "
+                f"({qpos_new.shape[-1]}/{qvel_new.shape[-1]}) != sim ({sim_nq}/{sim_nv})."
             )
             return False
 
@@ -331,7 +463,7 @@ def main():
         hold_last_frame = False
         current_idx = target_idx
         print(
-            f"[INFO] Loaded ({reason}): {path} | frames={steps}, fps={fps:.3f}, "
+            f"[INFO] Loaded ({reason}): {src.label or src.path} | frames={steps}, fps={fps:.3f}, "
             f"range=[{start_idx}, {end_idx}), robot={args.robot}, device={device}, speed={args.speed}"
         )
         print(
@@ -341,12 +473,12 @@ def main():
         return True
 
     loaded = False
-    for idx in range(len(motion_files)):
+    for idx in range(len(motion_sources)):
         if _load_motion_by_index(idx, reason="init"):
             loaded = True
             break
     if not loaded:
-        raise RuntimeError("No playable motion npz found (all files failed to load or dimension mismatch).")
+        raise RuntimeError("No playable motion found (all files/clips failed to load or dimension mismatch).")
 
     motion_dropdown = None
     if len(motion_labels) > 1:
@@ -354,7 +486,7 @@ def main():
             "Motion File",
             options=motion_labels,
             initial_value=motion_labels[current_idx],
-            hint="Select npz file to replay.",
+            hint="Select clip to replay.",
         )
 
     print("Press Ctrl+C to exit.")
@@ -394,7 +526,7 @@ def main():
                     frame_idx = max(steps - 1, 0)
                     hold_last_frame = True
                     print(
-                        f"[INFO] Reached end of {motion_files[current_idx].name}. "
+                        f"[INFO] Reached end of {motion_sources[current_idx].label or motion_sources[current_idx].path.name}. "
                         "Use 'Motion File' dropdown to switch."
                     )
                 else:

@@ -29,7 +29,12 @@ class SimpleEnv(_Env):
             mjlab_dt = self.cfg.sim.get("mujoco_physics_dt", None)
         decimation_est = max(1, int(round(float(self.cfg.sim.step_dt) / float(mjlab_dt))))
 
-        env_spacing = self.cfg.viewer.get("env_spacing", 2.5)
+        env_spacing = float(self.cfg.sim.get("env_spacing", self.cfg.viewer.get("env_spacing", 2.5)))
+        print(
+            "[INFO] Scene spacing: "
+            f"physics_env_spacing={env_spacing:.3f} "
+            f"viewer_env_spacing={float(self.cfg.viewer.get('env_spacing', env_spacing)):.3f}"
+        )
         scene_cfg = MJSceneCfg(num_envs=self.cfg.num_envs, env_spacing=env_spacing)
 
         scene_cfg.terrain = TerrainEntityCfg(
@@ -279,13 +284,13 @@ class SimpleEnv(_Env):
 
         
     def _reset_idx(self, env_ids: torch.Tensor):
+        if hasattr(self.scene, "reset"):
+            self.scene.reset(env_ids)
+        self._align_tennis_court_to_env_origins(env_ids)
         init_root_state = self.command_manager.sample_init(env_ids)
         if init_root_state is not None and not self.robot.is_fixed_base:
             self.robot.write_root_state_to_sim(init_root_state, env_ids=env_ids)
         self.stats[env_ids] = 0.0
-        if hasattr(self.scene, "reset"):
-            self.scene.reset(env_ids)
-        self._align_tennis_court_to_env_origins(env_ids)
 
     def render(self, mode: str = "human"):
         return super().render(mode)
