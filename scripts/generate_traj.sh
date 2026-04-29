@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 TASK="${TASK:-G1/G1_tennis_highlevel}"
 EXP="${EXP:-highlevel}"
@@ -10,6 +10,14 @@ NUM_SAMPLES="${NUM_SAMPLES:-4096}"
 BATCH_SIZE="${BATCH_SIZE:-2048}"
 OUTPUT_DIR="${OUTPUT_DIR:-data/tennis_launch_bank/highlevel_subsets}"
 
+if [[ -x "./.venv/bin/python" ]]; then
+  PYTHON_BIN="./.venv/bin/python"
+elif command -v uv >/dev/null 2>&1; then
+  PYTHON_BIN="uv run python"
+else
+  PYTHON_BIN="python"
+fi
+
 EASY_OUT="${OUTPUT_DIR}/launch_bank_easy.npz"
 MEDIUM_OUT="${OUTPUT_DIR}/launch_bank_medium.npz"
 HARD_OUT="${OUTPUT_DIR}/launch_bank_hard.npz"
@@ -17,7 +25,7 @@ HARD_OUT="${OUTPUT_DIR}/launch_bank_hard.npz"
 mkdir -p "${OUTPUT_DIR}"
 
 # Easy: prioritize learnable near-robot bounces, but allow a small mid-court tail.
-./.venv/bin/python scripts/generate_tennis_launch_bank.py \
+${PYTHON_BIN} scripts/generate_tennis_launch_bank.py \
   --task "${TASK}" \
   --exp "${EXP}" \
   --device "${DEVICE}" \
@@ -39,8 +47,9 @@ mkdir -p "${OUTPUT_DIR}"
   --min-forward-speed 2.6 \
   --output "${EASY_OUT}"
 
-# Medium: cover most of return side, including near-net service-box region.
-./.venv/bin/python scripts/generate_tennis_launch_bank.py \
+# Medium: back-court dominant on robot side.
+# Court reference (tennis_court.xml): near service line at y=-6.40, near baseline at y=-11.885.
+${PYTHON_BIN} scripts/generate_tennis_launch_bank.py \
   --task "${TASK}" \
   --exp "${EXP}" \
   --device "${DEVICE}" \
@@ -50,20 +59,20 @@ mkdir -p "${OUTPUT_DIR}"
   --launcher-y-range 3.5 7.0 \
   --launcher-z-range 1.6 2.5 \
   --strike-x-range -1.8 1.8 \
-  --strike-y-range -8.6 -2.6 \
+  --strike-y-range -9.4 -5.8 \
   --strike-z-range 0.95 1.30 \
   --incoming-bounce-x-range -2.8 2.8 \
-  --incoming-bounce-y-range -10.2 -2.8 \
-  --flight-t-range 0.90 1.35 \
+  --incoming-bounce-y-range -10.8 -6.2 \
+  --flight-t-range 0.85 1.45 \
   --launch-speed-range 6.8 16.0 \
   --launch-spin-rps-range -8.0 8.0 \
   --angle-deg-range 8.0 23.0 \
-  --min-vz 1.6 \
-  --min-forward-speed 3.2 \
+  --min-vz 1.2 \
+  --min-forward-speed 2.8 \
   --output "${MEDIUM_OUT}"
 
-# Hard: full legal incoming half-court coverage, including close-to-net bounces.
-./.venv/bin/python scripts/generate_tennis_launch_bank.py \
+# Hard: broader than medium but still mostly back-court (avoid front-court near net).
+${PYTHON_BIN} scripts/generate_tennis_launch_bank.py \
   --task "${TASK}" \
   --exp "${EXP}" \
   --device "${DEVICE}" \
@@ -73,16 +82,16 @@ mkdir -p "${OUTPUT_DIR}"
   --launcher-y-range 3.5 7.5 \
   --launcher-z-range 1.6 2.5 \
   --strike-x-range -3.2 3.2 \
-  --strike-y-range -7.2 -1.6 \
+  --strike-y-range -9.6 -5.4 \
   --strike-z-range 0.90 1.35 \
   --incoming-bounce-x-range -3.6 3.6 \
-  --incoming-bounce-y-range -9.8 -0.8 \
-  --flight-t-range 0.75 1.20 \
+  --incoming-bounce-y-range -11.0 -5.8 \
+  --flight-t-range 0.70 1.35 \
   --launch-speed-range 7.5 18.0 \
   --launch-spin-rps-range -9.0 9.0 \
   --angle-deg-range 8.0 26.0 \
-  --min-vz 1.2 \
-  --min-forward-speed 2.8 \
+  --min-vz 1.0 \
+  --min-forward-speed 2.4 \
   --output "${HARD_OUT}"
 
 cat > "${OUTPUT_DIR}/launch_bank_manifest.txt" << EOF

@@ -810,6 +810,7 @@ def main():
                 f"--recovery-target-offset must provide exactly 3 floats, got {args.recovery_target_offset}."
             )
         recover_target_w = slot_origin[0] + recovery_target_offset
+        recover_target_w[..., -1] = 0.1
 
         state["slot"] = int(slot_idx)
         state["qpos_slot"] = qpos_slot

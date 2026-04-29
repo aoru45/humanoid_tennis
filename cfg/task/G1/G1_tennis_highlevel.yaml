@@ -83,7 +83,7 @@ command:
         curriculum_start_probs: [0.80, 0.15, 0.05]
         curriculum_target_probs: [0.20, 0.35, 0.45]
         curriculum_progress_up: 0.04
-        curriculum_progress_down: 0.0
+        curriculum_progress_down: 0.06
         curriculum_ema_alpha: 0.05
         curriculum_min_level_prob: 0.05
     court:
