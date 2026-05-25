@@ -1,7 +1,7 @@
 # Humanoid Tennis
 
 ## Introduction
-This project implements a physics-based reinforcement learning framework for a humanoid robot (Unitree G1) to learn motion tracking and complex high-level tasks, specifically playing tennis. The Python package name is `humanoid_tennis`. The training pipeline uses `mjlab` and is divided into a hierarchical curriculum:
+This project uses `mjlab` to train a Unitree G1 humanoid robot to play tennis. The Python package name is `humanoid_tennis`, and the repository contains the reinforcement learning pipeline, tennis task design, rollout utilities, and policy export scripts. The training curriculum is organized into three stages:
 1. **Stage 1 (Motion Tracking)**: The robot learns to robustly track diverse reference motions.
 2. **Pulse Stage**: A distillation/compression phase where the robot's capabilities are encoded into a latent "Pulse" representation.
 3. **High-Level Task**: The robot utilizes the learned latent space to solve the dynamic task of intercepting and hitting a tennis ball over the net.
@@ -48,3 +48,9 @@ Finally, train the high-level policy to play tennis using the pre-trained Pulse 
 ```bash
 ./train_highlevel.sh
 ```
+
+## Acknowledgements
+
+This project is inspired by the LATENT project from Galaxy General Robotics, Tsinghua University, and Galbot:
+
+https://github.com/GalaxyGeneralRobotics/LATENT
