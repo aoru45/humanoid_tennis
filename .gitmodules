@@ -1,0 +1,4 @@
+[submodule "sim2real"]
+	path = sim2real
+	url = git@github.com:aoru45/tennis_deploy_sim2real.git
+	branch = main

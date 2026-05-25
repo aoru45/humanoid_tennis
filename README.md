@@ -1,7 +1,7 @@
 # Humanoid Tennis
 
 ## Introduction
-This project implements a physics-based reinforcement learning framework for a humanoid robot (Unitree G1) to learn motion tracking and complex high-level tasks, specifically playing tennis. The Python package name is `humanoid_tennis`. The training pipeline uses MuJoCo as the underlying physics engine and is divided into a hierarchical curriculum:
+This project implements a physics-based reinforcement learning framework for a humanoid robot (Unitree G1) to learn motion tracking and complex high-level tasks, specifically playing tennis. The Python package name is `humanoid_tennis`. The training pipeline uses `mjlab` and is divided into a hierarchical curriculum:
 1. **Stage 1 (Motion Tracking)**: The robot learns to robustly track diverse reference motions.
 2. **Pulse Stage**: A distillation/compression phase where the robot's capabilities are encoded into a latent "Pulse" representation.
 3. **High-Level Task**: The robot utilizes the learned latent space to solve the dynamic task of intercepting and hitting a tennis ball over the net.
@@ -11,6 +11,18 @@ This project uses `uv` for fast Python package management. To install all necess
 
 ```bash
 uv sync
+```
+
+## Sim2Real Deployment
+
+The sim2real deployment and sim-to-sim assets live in a separate repository:
+
+https://github.com/aoru45/tennis_deploy_sim2real
+
+This repository references it as the `sim2real` git submodule. Initialize it when deployment-side code is needed:
+
+```bash
+git submodule update --init --recursive sim2real
 ```
 
 ## Training
