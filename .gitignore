@@ -205,3 +205,4 @@ motion.npy
 dataset
 data/*
 *.pdf
+AGENTS.md

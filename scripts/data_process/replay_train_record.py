@@ -42,7 +42,6 @@ def _find_latest_train_record(project_root: Path) -> Path:
     candidates = [p for p in candidates if p.is_file()]
     if not candidates:
         raise FileNotFoundError(f"No train record npz found under: {outputs_dir}")
-
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 

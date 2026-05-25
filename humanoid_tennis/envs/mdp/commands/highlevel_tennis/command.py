@@ -37,13 +37,16 @@ class HighLevelTennisCommand(
     RACKET_CENTER_OFFSET = (0.1025, -0.004, 0.4)
     USE_RACKET_BODY_CONTACT_SENSOR = False
     ENABLE_RACKET_BODY_DIRECT_CONTACT_GUARD = True
-    RACKET_BODY_CONTACT_MIN_PENETRATION = 0.01
+    RACKET_BODY_CONTACT_MIN_PENETRATION = 0.05
     STROKE_MODE_LATERAL_DEADZONE = 0.12
     BALANCE_STROKE_MODE_SAMPLING = True
     BALANCE_STROKE_MODE_MAX_RESAMPLE_ROUNDS = 12
     FAIL_ON_WRONG_BOUNCE_SIDE = True
     POST_HIT_FORWARD_DIR_GRACE_STEPS = 10
     POST_HIT_MIN_FORWARD_SPEED = 1.0
+    REPLAY_CAPTURE_MIN_POST_HIT_SUBSTEPS = 8
+    REPLAY_CAPTURE_MIN_FORWARD_SPEED = 1.0
+    REPLAY_LAUNCH_LEVEL_ID = -2
 
     def __init__(
         self,
@@ -64,6 +67,7 @@ class HighLevelTennisCommand(
         spawn_cfg = cfg.spawn
         approach_cfg = cfg.approach
         launch_cfg = cfg.launch
+        replay_cfg = launch_cfg.replay
         court_cfg = cfg.court
         recover_cfg = cfg.recover
         launch_bank_cfg = launch_cfg.bank
@@ -80,13 +84,47 @@ class HighLevelTennisCommand(
         self.max_task_steps = int(episode_cfg.max_task_steps)
         self.max_consecutive_returns_before_finish = max(0, int(episode_cfg.max_consecutive_returns_before_finish))
         self.relaunch_on_success = bool(episode_cfg.relaunch_on_success)
-        self.launch_interval_s = max(float(episode_cfg.launch_interval_s), 0.0)
-        self.launch_interval_steps = int(round(self.launch_interval_s / float(self.env.step_dt)))
+        launch_interval_s_range = tuple(float(v) for v in episode_cfg.launch_interval_s_range)
+        if len(launch_interval_s_range) != 2:
+            raise ValueError(
+                f"episode.launch_interval_s_range must have length 2, got {launch_interval_s_range}."
+            )
+        launch_interval_s_min = max(min(launch_interval_s_range), 0.0)
+        launch_interval_s_max = max(max(launch_interval_s_range), launch_interval_s_min)
+        self.relaunch_launch_interval_steps_min = int(round(launch_interval_s_min / float(self.env.step_dt)))
+        self.relaunch_launch_interval_steps_max = max(
+            self.relaunch_launch_interval_steps_min,
+            int(round(launch_interval_s_max / float(self.env.step_dt))),
+        )
         self.relaunch_require_recovery = bool(episode_cfg.relaunch_require_recovery)
         self.relaunch_recovery_hold_steps = max(1, int(episode_cfg.relaunch_recovery_hold_steps))
+        relaunch_recovery_hold_steps_range = tuple(int(v) for v in episode_cfg.relaunch_recovery_hold_steps_range)
+        if len(relaunch_recovery_hold_steps_range) != 2:
+            raise ValueError(
+                "episode.relaunch_recovery_hold_steps_range must have length 2, "
+                f"got {relaunch_recovery_hold_steps_range}."
+            )
+        self.relaunch_recovery_hold_steps_min = max(1, min(relaunch_recovery_hold_steps_range))
+        self.relaunch_recovery_hold_steps_max = max(
+            self.relaunch_recovery_hold_steps_min,
+            max(relaunch_recovery_hold_steps_range),
+        )
         self.relaunch_recovery_timeout_steps = max(
             self.relaunch_recovery_hold_steps,
             int(round(max(float(episode_cfg.relaunch_recovery_timeout_s), 0.0) / float(self.env.step_dt))),
+        )
+        relaunch_recovery_timeout_s_range = tuple(float(v) for v in episode_cfg.relaunch_recovery_timeout_s_range)
+        if len(relaunch_recovery_timeout_s_range) != 2:
+            raise ValueError(
+                "episode.relaunch_recovery_timeout_s_range must have length 2, "
+                f"got {relaunch_recovery_timeout_s_range}."
+            )
+        relaunch_timeout_s_min = max(min(relaunch_recovery_timeout_s_range), 0.0)
+        relaunch_timeout_s_max = max(max(relaunch_recovery_timeout_s_range), relaunch_timeout_s_min)
+        self.relaunch_recovery_timeout_steps_min = int(round(relaunch_timeout_s_min / float(self.env.step_dt)))
+        self.relaunch_recovery_timeout_steps_max = max(
+            self.relaunch_recovery_timeout_steps_min,
+            int(round(relaunch_timeout_s_max / float(self.env.step_dt))),
         )
         self.highlevel_latent_dim = int(cfg.highlevel_latent_dim)
         self.ball_obs_history_steps = tuple(int(s) for s in cfg.ball_obs_history_steps)
@@ -129,12 +167,14 @@ class HighLevelTennisCommand(
         self.drag_coef = float(cfg.drag_coef)
         self.lift_spin_scale = float(cfg.lift_spin_scale)
         self.spin_damping_coef = float(cfg.spin_damping_coef)
+        self.drag_coef_env = torch.full((self.num_envs, 1), self.drag_coef, device=self.device, dtype=torch.float32)
         self.aero_force_k = 0.5 * self.air_density * math.pi * (self.ball_radius ** 2) * self.air_drag_k
         self.net_height = float(court_cfg.net_height)
         self.net_half_thickness = float(court_cfg.net_half_thickness)
         self.net_clearance_reward_margin = float(court_cfg.net_clearance_reward_margin)
         self.miss_margin_y = float(court_cfg.miss_margin_y)
         self.out_margin_z = float(court_cfg.out_margin_z)
+        self.out_max_z = max(float(court_cfg.out_max_z), self.out_margin_z + 0.05)
         self.pre_hit_dead_ball_speed_thres = float(recover_cfg.pre_hit_dead_ball_speed_thres)
         self.pre_hit_dead_ball_height_margin = float(recover_cfg.pre_hit_dead_ball_height_margin)
         self.pre_hit_dead_ball_patience_steps = max(1, int(recover_cfg.pre_hit_dead_ball_patience_steps))
@@ -143,6 +183,13 @@ class HighLevelTennisCommand(
         self.post_hit_dead_ball_height_margin = float(recover_cfg.post_hit_dead_ball_height_margin)
         self.post_hit_dead_ball_patience_steps = max(1, int(recover_cfg.post_hit_dead_ball_patience_steps))
         self.post_hit_dead_ball_min_steps = max(1, int(recover_cfg.post_hit_dead_ball_min_steps))
+        self.post_hit_vertical_stall_min_steps = max(
+            0,
+            int(round(max(float(recover_cfg.post_hit_vertical_stall_min_time_s), 0.0) / float(self.env.step_dt))),
+        )
+        self.post_hit_vertical_stall_min_z = float(recover_cfg.post_hit_vertical_stall_min_z)
+        self.post_hit_vertical_stall_max_xy_speed = max(0.0, float(recover_cfg.post_hit_vertical_stall_max_xy_speed))
+        self.post_hit_vertical_stall_min_vz = float(recover_cfg.post_hit_vertical_stall_min_vz)
         self.court_x_limit = float(court_cfg.x_limit)
         self.court_y_limit = float(court_cfg.y_limit)
         self.court_y_min_success = float(court_cfg.y_min_success)
@@ -189,6 +236,45 @@ class HighLevelTennisCommand(
                 )
             self.launch_bank.load(self.launch_bank_file)
 
+        self.replay_launch_enabled = bool(replay_cfg.enabled)
+        self.replay_launch_capacity = max(1, int(replay_cfg.capacity))
+        self.replay_launch_min_size_to_sample = min(
+            self.replay_launch_capacity,
+            max(1, int(replay_cfg.min_size_to_sample)),
+        )
+        self.replay_launch_mix_prob_start = float(replay_cfg.mix_prob_start)
+        self.replay_launch_mix_prob_end = float(replay_cfg.mix_prob_end)
+        self.replay_launch_mix_progress_start = float(replay_cfg.mix_progress_start)
+        self.replay_launch_mix_progress_end = float(replay_cfg.mix_progress_end)
+        self.replay_launch_mix_prob_start = min(max(self.replay_launch_mix_prob_start, 0.0), 1.0)
+        self.replay_launch_mix_prob_end = min(max(self.replay_launch_mix_prob_end, 0.0), 1.0)
+        self.replay_launch_mix_prob = self.replay_launch_mix_prob_start
+
+        self.replay_launch_count = 0
+        self.replay_launch_ptr = 0
+        self.replay_added_total = 0
+        self.replay_rejected_total = 0
+        self.replay_sampled_total = 0
+        self.replay_sampled_last_count = 0
+        self.replay_sample_requested_last = 0
+        self.replay_launch_pos_local = None
+        self.replay_launch_vel = None
+        self.replay_launch_ang = None
+        self.replay_launch_target_local = None
+        if self.replay_launch_enabled:
+            self.replay_launch_pos_local = torch.zeros(
+                (self.replay_launch_capacity, 3), dtype=torch.float32, device=self.device
+            )
+            self.replay_launch_vel = torch.zeros(
+                (self.replay_launch_capacity, 3), dtype=torch.float32, device=self.device
+            )
+            self.replay_launch_ang = torch.zeros(
+                (self.replay_launch_capacity, 3), dtype=torch.float32, device=self.device
+            )
+            self.replay_launch_target_local = torch.zeros(
+                (self.replay_launch_capacity, 3), dtype=torch.float32, device=self.device
+            )
+
         self.outgoing_speed_minmax = torch.tensor(cfg.outgoing_speed_minmax, device=self.device, dtype=torch.float32)
 
         racket_body_name = str(self.RACKET_BODY_NAME)
@@ -205,6 +291,8 @@ class HighLevelTennisCommand(
         self.fail_on_wrong_bounce_side = bool(self.FAIL_ON_WRONG_BOUNCE_SIDE)
         self.post_hit_forward_dir_grace_steps = max(0, int(self.POST_HIT_FORWARD_DIR_GRACE_STEPS))
         self.post_hit_min_forward_speed = float(self.POST_HIT_MIN_FORWARD_SPEED)
+        self.replay_capture_min_post_hit_substeps = max(0, int(self.REPLAY_CAPTURE_MIN_POST_HIT_SUBSTEPS))
+        self.replay_capture_min_forward_speed = float(self.REPLAY_CAPTURE_MIN_FORWARD_SPEED)
         self.contact_sensors = ContactSensorHandles.from_scene(self.env.scene)
 
         self.racket_contact_geom_ids = torch.zeros((0,), dtype=torch.int32, device=self.device)
@@ -219,6 +307,11 @@ class HighLevelTennisCommand(
         # Build direct-contact guard geom sets in global MuJoCo geom-id space.
         # This avoids id-space mismatch between entity-local geom ids and
         # contact.geom ids in vectorized worlds.
+        ignored_racket_body_geoms = {
+            "right_hand_collision",  # mounting hand
+            "left_hand_collision",   # fake hand
+            "left_wrist_collision",  # fake wrist
+        }
         model_racket_ids: list[int] = []
         model_body_ids: list[int] = []
         ngeom = int(getattr(self.env.sim.mj_model, "ngeom", 0))
@@ -235,8 +328,8 @@ class HighLevelTennisCommand(
                 continue
             if not base_name.endswith("_collision"):
                 continue
-            # Exclude only mounting hand, keep all other robot body parts.
-            if base_name == "right_hand_collision":
+            # Exclude mounting hand and fake left hand/wrist, keep all other robot body parts.
+            if base_name in ignored_racket_body_geoms:
                 continue
             model_body_ids.append(gid)
 
@@ -250,7 +343,7 @@ class HighLevelTennisCommand(
                 name = str(gname)
                 if name == "tennis_racket_collision":
                     continue
-                if name == "right_hand_collision":
+                if name in ignored_racket_body_geoms:
                     continue
                 model_body_ids.append(int(gid))
 
@@ -295,6 +388,18 @@ class HighLevelTennisCommand(
         self._rally_relaunch_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._rally_launch_delay = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
         self._rally_launch_ready = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._rally_recovery_hold_steps_target = torch.full(
+            (self.num_envs,),
+            int(self.relaunch_recovery_hold_steps),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self._rally_recovery_timeout_steps_target = torch.full(
+            (self.num_envs,),
+            int(self.relaunch_recovery_timeout_steps),
+            dtype=torch.int32,
+            device=self.device,
+        )
         self.has_hit = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.has_bounce = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.has_pass_net = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -358,8 +463,18 @@ class HighLevelTennisCommand(
             (self.num_envs, self.ball_obs_buffer_size, 3), dtype=torch.float32, device=self.device
         )
         self._prime_ball_obs_history(torch.arange(self.num_envs, device=self.device, dtype=torch.long))
+        self.replay_pending_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.replay_pending_pos_w = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        self.replay_pending_vel_w = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        self.replay_pending_ang_w = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        self.replay_pending_target_bounce_w = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+        self.replay_pending_capture_age_substeps = torch.zeros(
+            self.num_envs, dtype=torch.int32, device=self.device
+        )
 
         self.target_bounce_w = torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
+        self.guidance_target_bounce_w = torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
+        self.guidance_target_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.launch_level_ids = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
         self.stroke_mode_target = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.stroke_mode_contact_lateral = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.float32)

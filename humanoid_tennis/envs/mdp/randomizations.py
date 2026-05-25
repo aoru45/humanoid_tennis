@@ -422,6 +422,225 @@ class perturb_body_com(Randomization):
         assert torch.allclose(model.body_ipos[:, self.global_body_ids], new_ipos)
 
 
+class perturb_joint_friction(Randomization):
+    def __init__(self, env, **friction_scale_ranges: Tuple[float, float]):
+        super().__init__(env)
+        self.ensure_model_fields_expanded("dof_frictionloss")
+        self.ensure_recompute_fields_expanded(RecomputeLevel.set_const_0)
+        self.asset: Articulation = self.env.scene["robot"]
+        if not friction_scale_ranges:
+            raise ValueError("perturb_joint_friction requires at least one joint range entry.")
+
+        joint_ids, joint_names, values = string_utils.resolve_matching_names_values(
+            friction_scale_ranges, self.asset.joint_names
+        )
+        if len(joint_ids) == 0:
+            raise ValueError(
+                "No joints matched the provided patterns for friction perturbation."
+            )
+
+        self.joint_names = joint_names
+        self.local_joint_ids = torch.as_tensor(joint_ids, device=self.device, dtype=torch.long)
+        self.dof_ids = self.asset.indexing.joint_v_adr[self.local_joint_ids]
+        self.scale_ranges = torch.as_tensor(values, device=self.device, dtype=torch.float32)
+
+        if (self.scale_ranges <= 0.0).any():
+            raise ValueError(f"friction scale range must be > 0, got {values}.")
+        if (self.scale_ranges[:, 1] < self.scale_ranges[:, 0]).any():
+            raise ValueError(f"friction scale range must satisfy low <= high, got {values}.")
+
+        model = self.env.sim.model
+        self._default_friction = model.dof_frictionloss[:, self.dof_ids].clone()
+
+    def startup(self):
+        logging.info(f"Randomize joint friction of {self.joint_names} upon startup.")
+        low = self.scale_ranges[:, 0].unsqueeze(0)
+        high = self.scale_ranges[:, 1].unsqueeze(0)
+        scale = uniform_like(self._default_friction, low, high)
+
+        model = self.env.sim.model
+        new_friction = self._default_friction * scale
+        model.dof_frictionloss[:, self.dof_ids] = new_friction
+        self.env.sim.recompute_constants(RecomputeLevel.set_const_0)
+
+        assert torch.allclose(model.dof_frictionloss[:, self.dof_ids], new_friction)
+
+
+class perturb_tennis_ball_dynamics(Randomization):
+    """Randomize tennis-ball dynamics with MuJoCo-compatible proxies.
+
+    Notes:
+    - "ball_ground_restitution_range" is mapped to terrain `geom_solref[..., 1]`.
+    - "ball_ground_tangential_damping_range" is mapped to terrain sliding friction `geom_friction[..., 0]`.
+    """
+
+    def __init__(
+        self,
+        env,
+        ball_mass_scale_range: Tuple[float, float] = (0.95, 1.05),
+        ball_ground_restitution_range: Tuple[float, float] = (0.06, 0.10),
+        ball_ground_tangential_damping_range: Tuple[float, float] = (0.40, 0.70),
+        ball_air_drag_coef_range: Tuple[float, float] = (0.267, 1.069),
+    ):
+        super().__init__(env)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.enabled = True
+
+        scene_entities = getattr(self.env.scene, "entities", {})
+        if "tennis_ball" not in scene_entities:
+            self.enabled = False
+            logging.info("Skip perturb_tennis_ball_dynamics: no 'tennis_ball' entity.")
+            return
+
+        self.ensure_model_fields_expanded("body_mass", "body_inertia", "geom_friction", "geom_solref")
+        self.ensure_recompute_fields_expanded(RecomputeLevel.set_const)
+
+        self.mass_low = float(ball_mass_scale_range[0])
+        self.mass_high = float(ball_mass_scale_range[1])
+        if self.mass_low <= 0.0 or self.mass_high <= 0.0 or self.mass_high < self.mass_low:
+            raise ValueError(f"Invalid ball_mass_scale_range={ball_mass_scale_range}.")
+
+        self.restitution_low = float(ball_ground_restitution_range[0])
+        self.restitution_high = float(ball_ground_restitution_range[1])
+        if self.restitution_high < self.restitution_low:
+            raise ValueError(f"Invalid ball_ground_restitution_range={ball_ground_restitution_range}.")
+
+        self.tangent_low = float(ball_ground_tangential_damping_range[0])
+        self.tangent_high = float(ball_ground_tangential_damping_range[1])
+        if self.tangent_low < 0.0 or self.tangent_high < 0.0 or self.tangent_high < self.tangent_low:
+            raise ValueError(
+                f"Invalid ball_ground_tangential_damping_range={ball_ground_tangential_damping_range}."
+            )
+
+        self.drag_low = float(ball_air_drag_coef_range[0])
+        self.drag_high = float(ball_air_drag_coef_range[1])
+        if self.drag_low <= 0.0 or self.drag_high <= 0.0 or self.drag_high < self.drag_low:
+            raise ValueError(f"Invalid ball_air_drag_coef_range={ball_air_drag_coef_range}.")
+
+        ball_entity = self.env.scene["tennis_ball"]
+        body_ids, body_names = ball_entity.find_bodies("tennis_ball")
+        if len(body_ids) != 1:
+            raise ValueError(
+                f"perturb_tennis_ball_dynamics expects one body 'tennis_ball', got {list(body_names)}."
+            )
+        self.ball_body_local_id = torch.as_tensor(body_ids, device=self.device, dtype=torch.long)
+        self.ball_body_global_id = ball_entity.indexing.body_ids[self.ball_body_local_id]
+
+        model = self.env.sim.model
+        self._default_ball_mass = model.body_mass[:, self.ball_body_global_id].clone()
+        self._default_ball_inertia = model.body_inertia[:, self.ball_body_global_id].clone()
+
+        self.terrain_geom_ids = torch.zeros((0,), dtype=torch.long, device=self.device)
+        if "terrain" in scene_entities:
+            terrain = self.env.scene["terrain"]
+            if hasattr(terrain, "indexing") and hasattr(terrain.indexing, "geom_ids"):
+                self.terrain_geom_ids = terrain.indexing.geom_ids.to(device=self.device, dtype=torch.long)
+
+        self.command = getattr(self.env, "command_manager", None)
+        self._base_drag_coef = None
+        if self.command is not None and hasattr(self.command, "drag_coef"):
+            self._base_drag_coef = float(getattr(self.command, "drag_coef"))
+
+    def startup(self):
+        if not self.enabled:
+            return
+
+        model = self.env.sim.model
+
+        # Ball mass/inertia
+        mass_scale = sample_uniform((self.num_envs, 1), self.mass_low, self.mass_high, device=self.device)
+        new_mass = self._default_ball_mass * mass_scale
+        new_inertia = self._default_ball_inertia * mass_scale.unsqueeze(-1)
+        model.body_mass[:, self.ball_body_global_id] = new_mass
+        model.body_inertia[:, self.ball_body_global_id] = new_inertia
+
+        # Terrain contact proxies for ball-ground dynamics
+        if self.terrain_geom_ids.numel() > 0:
+            n_geom = int(self.terrain_geom_ids.numel())
+            tangential = sample_uniform(
+                (self.num_envs, n_geom),
+                self.tangent_low,
+                self.tangent_high,
+                device=self.device,
+            )
+            restitution_proxy = sample_uniform(
+                (self.num_envs, n_geom),
+                self.restitution_low,
+                self.restitution_high,
+                device=self.device,
+            )
+            model.geom_friction[:, self.terrain_geom_ids, 0] = tangential
+            model.geom_solref[:, self.terrain_geom_ids, 1] = restitution_proxy
+
+        self.env.sim.recompute_constants(RecomputeLevel.set_const)
+
+        # Per-env drag coefficient used by highlevel tennis aerodynamic force.
+        if self.command is not None and self._base_drag_coef is not None:
+            drag = sample_uniform(
+                (self.num_envs, 1),
+                self.drag_low,
+                self.drag_high,
+                device=self.device,
+            )
+            self.command.drag_coef_env = drag
+
+
+class perturb_racket_com(Randomization):
+    def __init__(
+        self,
+        env,
+        body_name: str = "tennis_racket_mount",
+        com_range: Tuple[float, float] = (-0.1, 0.1),
+    ):
+        super().__init__(env)
+        self.asset: Articulation = self.env.scene["robot"]
+        self.enabled = True
+        self.body_name = body_name
+
+        body_ids = [
+            i for i, name in enumerate(self.asset.body_names)
+            if re.fullmatch(body_name, name)
+        ]
+        if len(body_ids) == 0:
+            self.enabled = False
+            logging.info(f"Skip perturb_racket_com: no body matched '{body_name}'.")
+            return
+        if len(body_ids) != 1:
+            matched = [self.asset.body_names[i] for i in body_ids]
+            raise ValueError(
+                f"perturb_racket_com expects exactly one body for '{body_name}', got {matched}."
+            )
+
+        if len(com_range) != 2:
+            raise ValueError(f"com_range must have exactly 2 values, got {com_range}")
+        self.com_low = float(com_range[0])
+        self.com_high = float(com_range[1])
+        if self.com_high < self.com_low:
+            raise ValueError(f"com_range must satisfy low <= high, got {com_range}")
+
+        self.ensure_model_fields_expanded("body_ipos")
+        self.ensure_recompute_fields_expanded(RecomputeLevel.set_const)
+        self.local_body_ids = torch.as_tensor(body_ids, device=self.device, dtype=torch.long)
+        self.global_body_ids = self.asset.indexing.body_ids[self.local_body_ids]
+        model = self.env.sim.model
+        self._default_body_ipos = model.body_ipos[:, self.global_body_ids].clone()
+
+    def startup(self):
+        if not self.enabled:
+            return
+        offsets = sample_uniform(
+            (self.num_envs, 1, 3),
+            self.com_low,
+            self.com_high,
+            device=self.device,
+        )
+        model = self.env.sim.model
+        new_ipos = self._default_body_ipos + offsets
+        model.body_ipos[:, self.global_body_ids] = new_ipos
+        self.env.sim.recompute_constants(RecomputeLevel.set_const)
+        assert torch.allclose(model.body_ipos[:, self.global_body_ids], new_ipos)
+
+
 class random_joint_offset(Randomization):
     def __init__(self, env, **offset_range: Tuple[float, float]):
         super().__init__(env)

@@ -7,9 +7,63 @@ from humanoid_tennis.utils.math import quat_apply, quat_apply_inverse
 
 
 class HighLevelTennisStateMixin:
+    def _effective_target_bounce_w(self) -> torch.Tensor:
+        if hasattr(self, "guidance_target_bounce_w") and hasattr(self, "guidance_target_valid"):
+            return torch.where(
+                self.guidance_target_valid.unsqueeze(-1),
+                self.guidance_target_bounce_w,
+                self.target_bounce_w,
+            )
+        return self.target_bounce_w
+
     def step_schedule(self, progress: float, iters: int | None = None):
-        _ = progress
         _ = iters
+        if not getattr(self, "replay_launch_enabled", False):
+            self.replay_launch_mix_prob = 0.0
+            return
+        p = float(min(max(progress, 0.0), 1.0))
+        p0 = float(self.replay_launch_mix_progress_start)
+        p1 = float(self.replay_launch_mix_progress_end)
+        if p <= p0:
+            mix_prob = float(self.replay_launch_mix_prob_start)
+        elif p >= p1:
+            mix_prob = float(self.replay_launch_mix_prob_end)
+        else:
+            alpha = (p - p0) / max(p1 - p0, 1.0e-6)
+            mix_prob = float(
+                self.replay_launch_mix_prob_start
+                + alpha * (self.replay_launch_mix_prob_end - self.replay_launch_mix_prob_start)
+            )
+        self.replay_launch_mix_prob = min(max(mix_prob, 0.0), 1.0)
+
+    def _sample_relaunch_timing(self, env_ids: torch.Tensor) -> None:
+        if env_ids.numel() == 0:
+            return
+        n = int(env_ids.numel())
+
+        li_min = int(self.relaunch_launch_interval_steps_min)
+        li_max = int(self.relaunch_launch_interval_steps_max)
+        if li_max <= li_min:
+            launch_delay = torch.full((n,), li_min, dtype=torch.int32, device=self.device)
+        else:
+            launch_delay = torch.randint(li_min, li_max + 1, (n,), device=self.device, dtype=torch.int32)
+        self._rally_launch_delay[env_ids] = launch_delay
+
+        hold_min = int(self.relaunch_recovery_hold_steps_min)
+        hold_max = int(self.relaunch_recovery_hold_steps_max)
+        if hold_max <= hold_min:
+            hold_steps = torch.full((n,), hold_min, dtype=torch.int32, device=self.device)
+        else:
+            hold_steps = torch.randint(hold_min, hold_max + 1, (n,), device=self.device, dtype=torch.int32)
+        self._rally_recovery_hold_steps_target[env_ids] = hold_steps
+
+        timeout_min = int(self.relaunch_recovery_timeout_steps_min)
+        timeout_max = int(self.relaunch_recovery_timeout_steps_max)
+        if timeout_max <= timeout_min:
+            timeout_steps = torch.full((n,), timeout_min, dtype=torch.int32, device=self.device)
+        else:
+            timeout_steps = torch.randint(timeout_min, timeout_max + 1, (n,), device=self.device, dtype=torch.int32)
+        self._rally_recovery_timeout_steps_target[env_ids] = torch.maximum(timeout_steps, hold_steps)
 
     def _sample_robot_spawn(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         env_origins = self.env.scene.env_origins[env_ids]
@@ -250,6 +304,8 @@ class HighLevelTennisStateMixin:
         ball_state[:, 10:13] = launch_ang_w
         self.ball.write_root_state_to_sim(ball_state, env_ids=env_ids)
         self.target_bounce_w[env_ids] = target_bounce_w
+        self.guidance_target_bounce_w[env_ids] = target_bounce_w
+        self.guidance_target_valid[env_ids] = True
         self.launch_level_ids[env_ids] = sampled_level_ids
         self.ball_pos_w_history[env_ids] = launch_pos_w.unsqueeze(1)
         self.ball_vel_w_history[env_ids] = launch_vel_w.unsqueeze(1)
@@ -344,6 +400,16 @@ class HighLevelTennisStateMixin:
         self._rally_relaunch_mask[env_ids] = False
         self._rally_launch_delay[env_ids] = 0
         self._rally_launch_ready[env_ids] = False
+        self._rally_recovery_hold_steps_target[env_ids] = int(self.relaunch_recovery_hold_steps)
+        self._rally_recovery_timeout_steps_target[env_ids] = int(self.relaunch_recovery_timeout_steps)
+        self.replay_pending_valid[env_ids] = False
+        self.replay_pending_pos_w[env_ids] = 0.0
+        self.replay_pending_vel_w[env_ids] = 0.0
+        self.replay_pending_ang_w[env_ids] = 0.0
+        self.replay_pending_target_bounce_w[env_ids] = 0.0
+        self.replay_pending_capture_age_substeps[env_ids] = 0
+        self.guidance_target_bounce_w[env_ids] = 0.0
+        self.guidance_target_valid[env_ids] = False
         self.racket_acc_norm[env_ids] = 0.0
         self.highlevel_action[env_ids] = 0.0
         self.correction_action[env_ids] = 0.0

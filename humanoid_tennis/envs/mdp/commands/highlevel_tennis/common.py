@@ -181,7 +181,7 @@ class LaunchBankBuffer:
         self.curriculum_start_probs = self._normalize_probs(start)
         self.curriculum_target_probs = self._normalize_probs(target)
         self.curriculum_progress_up = max(0.0, float(progress_up))
-        # Kept for config compatibility; curriculum is strictly non-decreasing.
+        # Allow recovery: curriculum can move down when success drops.
         self.curriculum_progress_down = max(0.0, float(progress_down))
         self.curriculum_ema_alpha = min(max(float(ema_alpha), 0.0), 1.0)
         self.curriculum_min_level_prob = min(max(float(min_level_prob), 0.0), 0.30)
@@ -251,10 +251,16 @@ class LaunchBankBuffer:
         self.curriculum_success_ema = (1.0 - alpha) * self.curriculum_success_ema + alpha * float(succ)
         ema = min(max(float(self.curriculum_success_ema), 0.0), 1.0)
 
-        # Monotonic curriculum: difficulty only increases over time.
-        # Progress rises with success EMA and is never decreased.
-        up = self.curriculum_progress_up * ema
-        self.curriculum_progress += up
+        # Bidirectional curriculum around a neutral success level.
+        # Above center -> increase difficulty; below center -> decrease.
+        center = 0.5
+        if ema >= center:
+            up = self.curriculum_progress_up * ((ema - center) / max(1.0 - center, 1.0e-6))
+            delta = up
+        else:
+            down = self.curriculum_progress_down * ((center - ema) / max(center, 1.0e-6))
+            delta = -down
+        self.curriculum_progress += delta
         self.curriculum_progress = float(min(max(self.curriculum_progress, 0.0), 1.0))
         assert self.curriculum_start_probs is not None
         assert self.curriculum_target_probs is not None

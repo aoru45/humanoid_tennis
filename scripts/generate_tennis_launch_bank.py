@@ -55,6 +55,11 @@ def main():
     parser.add_argument("--num-samples", type=int, default=4096)
     parser.add_argument("--batch-size", type=int, default=512, help="How many launches to sample per call.")
     parser.add_argument("--print-every", type=int, default=1024)
+    parser.add_argument(
+        "--log-failure-reasons",
+        action="store_true",
+        help="Print per-constraint failure diagnostics when sampler retries/fails.",
+    )
     parser.add_argument("--launcher-x-range", type=float, nargs=2, default=None)
     parser.add_argument("--launcher-y-range", type=float, nargs=2, default=None)
     parser.add_argument("--launcher-z-range", type=float, nargs=2, default=None)
@@ -150,10 +155,16 @@ def main():
         while not sample_ok:
             try:
                 with torch.no_grad():
-                    pos_local, vel, ang, tgt_local = sampler.sample(n)
+                    pos_local, vel, ang, tgt_local = sampler.sample(
+                        n, collect_diagnostics=bool(args.log_failure_reasons)
+                    )
                 sample_ok = True
+                if args.log_failure_reasons and n != n_target and sampler.last_sample_diagnostics is not None:
+                    print(f"[INFO] sampler diagnostics after fallback success: {sampler.format_last_sample_diagnostics()}")
             except RuntimeError as err:
                 last_err = err
+                if args.log_failure_reasons and sampler.last_sample_diagnostics is not None:
+                    print(f"[WARN] sampler diagnostics: {sampler.format_last_sample_diagnostics()}")
                 if n > 1:
                     n = max(1, n // 2)
                     print(f"[WARN] sampler.sample failed for batch={n_target}, retry with smaller batch={n}: {err}")
@@ -163,14 +174,20 @@ def main():
                 for retry_i in range(8):
                     try:
                         with torch.no_grad():
-                            pos_local, vel, ang, tgt_local = sampler.sample(1)
+                            pos_local, vel, ang, tgt_local = sampler.sample(
+                                1, collect_diagnostics=bool(args.log_failure_reasons)
+                            )
                         sample_ok = True
                         retried = True
                         if retry_i > 0:
                             print(f"[WARN] single-sample retry succeeded after {retry_i + 1} attempts.")
+                        if args.log_failure_reasons and sampler.last_sample_diagnostics is not None:
+                            print(f"[INFO] sampler diagnostics(single): {sampler.format_last_sample_diagnostics()}")
                         break
                     except RuntimeError as err_single:
                         last_err = err_single
+                        if args.log_failure_reasons and sampler.last_sample_diagnostics is not None:
+                            print(f"[WARN] sampler diagnostics(single): {sampler.format_last_sample_diagnostics()}")
                 if not retried:
                     raise RuntimeError(
                         f"Failed to sample even a single launch after retries. Last error: {last_err}"

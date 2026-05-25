@@ -58,6 +58,15 @@ class HighLevelTennisRuntimeFlowMixin:
             self.hit_cooldown[hit_mask] = 12
             self.hit_racket_speed[hit_mask, 0] = racket_speed
 
+            if self.replay_launch_enabled:
+                effective_target_bounce_w = self._effective_target_bounce_w()
+                self.replay_pending_valid[hit_mask] = True
+                self.replay_pending_pos_w[hit_mask] = ball_pos_w[hit_mask]
+                self.replay_pending_vel_w[hit_mask] = ball_vel_w[hit_mask]
+                self.replay_pending_ang_w[hit_mask] = ball_ang_w[hit_mask]
+                self.replay_pending_target_bounce_w[hit_mask] = effective_target_bounce_w[hit_mask]
+                self.replay_pending_capture_age_substeps[hit_mask] = 0
+
             forehand_face_w, backhand_face_w = self._racket_face_dirs_w()
             incoming_dir_w = -ball_vel_w[hit_mask]
             incoming_dir_w = incoming_dir_w / incoming_dir_w.norm(dim=-1, keepdim=True).clamp_min(1.0e-6)
@@ -97,6 +106,24 @@ class HighLevelTennisRuntimeFlowMixin:
             if style_bad.any():
                 self.fail_style[style_bad] = True
                 self.stroke_style_violation_event[style_bad] = True
+
+        if self.replay_launch_enabled:
+            # Lock one pre-net outgoing frame with sufficient forward speed.
+            # If never reached, replay sample will be refused at commit time.
+            track_mask = self.replay_pending_valid & self.has_hit & (~self.has_bounce)
+            if track_mask.any():
+                cur_vy = ball_vel_w[:, 1]
+                v_min = float(self.replay_capture_min_forward_speed)
+                min_substeps = int(self.replay_capture_min_post_hit_substeps)
+                mature = self.replay_pending_capture_age_substeps >= min_substeps
+                has_locked = self.replay_pending_vel_w[:, 1] > v_min
+                pre_net = ball_pos_l[:, 1] < 0.0
+                outgoing_mask = track_mask & mature & (~has_locked) & pre_net & (cur_vy > v_min)
+                if outgoing_mask.any():
+                    self.replay_pending_pos_w[outgoing_mask] = ball_pos_w[outgoing_mask]
+                    self.replay_pending_vel_w[outgoing_mask] = ball_vel_w[outgoing_mask]
+                    self.replay_pending_ang_w[outgoing_mask] = ball_ang_w[outgoing_mask]
+                self.replay_pending_capture_age_substeps[track_mask] += 1
 
         bounce_contact_mask = self.ball_court_contact_event | (
             self.ball_court_contact & (ball_vel_w[:, 2] > 0.0)
@@ -140,7 +167,8 @@ class HighLevelTennisRuntimeFlowMixin:
         vel_dir = ball_vel_w / speed
         spin_axis = ball_ang_w / spin_mag.clamp_min(1e-6)
         cl = 1.0 / (2.0 + torch.abs(speed / (spin_scaled + 1e-6)))
-        drag_force = -self.aero_force_k * self.drag_coef * speed * ball_vel_w
+        drag_coef = getattr(self, "drag_coef_env", self.drag_coef)
+        drag_force = -self.aero_force_k * drag_coef * speed * ball_vel_w
         lift_dir = torch.cross(spin_axis, vel_dir, dim=-1)
         lift_force = self.aero_force_k * cl * speed.square() * lift_dir
         total_force = drag_force + lift_force
@@ -199,7 +227,8 @@ class HighLevelTennisRuntimeFlowMixin:
         self.prehit_zone_entered |= self.prehit_zone_event
         self.prehit_zone[:] = zone_now
 
-        self.ball_target_dist[:] = (ball_pos_w[:, :2] - self.target_bounce_w[:, :2]).norm(dim=-1, keepdim=True)
+        effective_target_bounce_w = self._effective_target_bounce_w()
+        self.ball_target_dist[:] = (ball_pos_w[:, :2] - effective_target_bounce_w[:, :2]).norm(dim=-1, keepdim=True)
         self.ball_target_progress_buf[:] = (self.prev_ball_target_dist - self.ball_target_dist).clamp(-1.0, 1.0)
         self.net_dist[:] = ball_pos_l[:, 1:2].abs()
         self.net_dist_progress_buf[:] = (self.prev_net_dist - self.net_dist).clamp(-1.0, 1.0)
@@ -229,6 +258,17 @@ class HighLevelTennisRuntimeFlowMixin:
             & (ball_vel_w[:, 1] <= self.post_hit_min_forward_speed)
         )
         self.fail_out |= wrong_outgoing_dir
+        post_hit_unresolved = self.has_hit & (~self.has_bounce) & (~self.success)
+        vertical_stall_grace_steps = max(self.post_hit_forward_dir_grace_steps, self.post_hit_vertical_stall_min_steps)
+        ball_xy_speed = ball_vel_w[:, :2].norm(dim=-1)
+        post_hit_vertical_stall = (
+            post_hit_unresolved
+            & (hit_elapsed_steps >= vertical_stall_grace_steps)
+            & (ball_pos_l[:, 2] >= self.post_hit_vertical_stall_min_z)
+            & (ball_xy_speed <= self.post_hit_vertical_stall_max_xy_speed)
+            & (ball_vel_w[:, 2] >= self.post_hit_vertical_stall_min_vz)
+        )
+        self.fail_out |= post_hit_vertical_stall
         post_hit_dead_ball = (
             self.has_hit
             & (hit_elapsed_steps >= self.post_hit_dead_ball_min_steps)
@@ -241,8 +281,15 @@ class HighLevelTennisRuntimeFlowMixin:
 
         ball_behind_root = ball_pos_w[:, 1] < (root_pos_w[:, 1] - self.miss_margin_y)
         self.fail_miss |= (~self.has_hit) & ball_behind_root & ball_dropped
+        post_hit_high_ball_out = (
+            self.has_hit
+            & (~self.has_bounce)
+            & (hit_elapsed_steps >= self.post_hit_forward_dir_grace_steps)
+            & (ball_pos_l[:, 2] > self.out_max_z)
+        )
         fail_out_candidate = (
             (ball_pos_l[:, 2] < self.out_margin_z)
+            | post_hit_high_ball_out
             | (ball_pos_l[:, 0].abs() > self.court_x_limit + 2.0)
             | (ball_pos_l[:, 1].abs() > self.court_y_limit + 4.0)
         )
@@ -257,6 +304,10 @@ class HighLevelTennisRuntimeFlowMixin:
         self.success_event[:] = new_success_event
         if new_success_event.any():
             self.consecutive_return_count[new_success_event] += 1
+            if self.replay_launch_enabled:
+                self._record_success_replay_launches(
+                    new_success_event.nonzero(as_tuple=False).squeeze(-1)
+                )
         if self.consecutive_return_count.numel() > 0:
             cur_best = int(self.consecutive_return_count.max().item())
             if cur_best > int(self.best_consecutive_return_total):
@@ -275,7 +326,8 @@ class HighLevelTennisRuntimeFlowMixin:
             newly_set = new_relaunch & (~self._rally_relaunch_mask)
             self._rally_relaunch_mask[:] = self._rally_relaunch_mask | new_relaunch
             if newly_set.any():
-                self._rally_launch_delay[newly_set] = self.launch_interval_steps
+                newly_set_ids = newly_set.nonzero(as_tuple=False).squeeze(-1)
+                self._sample_relaunch_timing(newly_set_ids)
                 self.recover_zone_inner_hold_steps[newly_set] = 0
                 self.recover_zone_elapsed_steps[newly_set] = 0
                 self.recover_zone_outer_entered[newly_set] = False
@@ -308,8 +360,8 @@ class HighLevelTennisRuntimeFlowMixin:
             if waiting.any():
                 self._rally_launch_delay[waiting] -= 1
             if self.relaunch_require_recovery:
-                recover_ready = self.recover_zone_inner_hold_steps >= self.relaunch_recovery_hold_steps
-                recover_timeout = self.recover_zone_elapsed_steps >= self.relaunch_recovery_timeout_steps
+                recover_ready = self.recover_zone_inner_hold_steps >= self._rally_recovery_hold_steps_target
+                recover_timeout = self.recover_zone_elapsed_steps >= self._rally_recovery_timeout_steps_target
                 timeout_fail = (
                     self._rally_relaunch_mask
                     & (self._rally_launch_delay <= 0)
@@ -346,6 +398,9 @@ class HighLevelTennisRuntimeFlowMixin:
         )
         # Rally failure event should be counted once (before finished flips to True).
         new_fail_event = (~self.finished) & (~success_done) & (fail_any | timeout)
+        if self.replay_launch_enabled and new_fail_event.any():
+            self.replay_pending_valid[new_fail_event] = False
+            self.replay_pending_capture_age_substeps[new_fail_event] = 0
 
         # Curriculum update uses resolved launch outcomes:
         # success: first legal bounce in opponent court; failure: miss/net/out/style.

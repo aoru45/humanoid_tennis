@@ -187,67 +187,6 @@ class HighLevelTennisActionContactMixin:
             return face_minus, face_plus
         return face_plus, face_minus
 
-    def _predict_ball_obs_features(
-        self,
-        *,
-        ball_pos_w: torch.Tensor,
-        ball_vel_w: torch.Tensor,
-        racket_pos_w: torch.Tensor,
-        root_pos_w: torch.Tensor,
-        root_quat_w: torch.Tensor,
-    ) -> torch.Tensor:
-        horizon = float(self.ball_obs_prediction_horizon_s)
-        horizon_t = torch.full(
-            (self.num_envs, 1),
-            horizon,
-            device=self.device,
-            dtype=torch.float32,
-        )
-
-        # Predicted hit point: closest approach to racket center with constant-velocity extrapolation.
-        rel_ball_racket = ball_pos_w - racket_pos_w
-        vel_norm_sq = ball_vel_w.square().sum(dim=-1, keepdim=True).clamp_min(1.0e-6)
-        t_hit = (-(rel_ball_racket * ball_vel_w).sum(dim=-1, keepdim=True) / vel_norm_sq).clamp(0.0, horizon)
-        pred_hit_pos_w = ball_pos_w + ball_vel_w * t_hit
-        pred_hit_pos_b = quat_apply_inverse(root_quat_w, pred_hit_pos_w - root_pos_w)
-        pred_hit_dist = (pred_hit_pos_w - racket_pos_w).norm(dim=-1, keepdim=True)
-        pred_hit_t_norm = t_hit / horizon_t
-
-        # Predicted first bounce with ballistic approximation.
-        gravity_z = float(self._read_gravity_z_value(self.env.sim.model.opt.gravity))
-        g = torch.full((self.num_envs, 1), gravity_z, device=self.device, dtype=torch.float32)
-        a = 0.5 * g
-        b = ball_vel_w[:, 2:3]
-        c = ball_pos_w[:, 2:3] - self.ball_radius
-        disc = (b.square() - 4.0 * a * c).clamp_min(0.0)
-        sqrt_disc = torch.sqrt(disc)
-        denom = (2.0 * a).clamp(min=-1.0e6, max=-1.0e-6)
-        t1 = (-b - sqrt_disc) / denom
-        t2 = (-b + sqrt_disc) / denom
-        t_candidates = torch.cat([t1, t2], dim=-1)
-        valid_candidates = t_candidates > 1.0e-4
-        t_pos = torch.where(valid_candidates, t_candidates, torch.full_like(t_candidates, float("inf")))
-        t_bounce = t_pos.min(dim=-1, keepdim=True).values
-        valid_bounce = torch.isfinite(t_bounce)
-        t_bounce = torch.where(valid_bounce, t_bounce, horizon_t).clamp(0.0, horizon)
-        pred_bounce_xy_w = ball_pos_w[:, :2] + ball_vel_w[:, :2] * t_bounce
-        pred_bounce_pos_w = torch.cat([pred_bounce_xy_w, torch.full_like(t_bounce, self.ball_radius)], dim=-1)
-        pred_bounce_pos_b = quat_apply_inverse(root_quat_w, pred_bounce_pos_w - root_pos_w)
-        pred_bounce_t_norm = t_bounce / horizon_t
-        pred_bounce_valid = valid_bounce.float()
-
-        return torch.cat(
-            [
-                pred_hit_pos_b,
-                pred_hit_t_norm,
-                pred_hit_dist,
-                pred_bounce_pos_b,
-                pred_bounce_t_norm,
-                pred_bounce_valid,
-            ],
-            dim=-1,
-        )
-
     def _capture_highlevel_action(self) -> None:
         td = getattr(self.env, "input_tensordict", None)
         if td is None:

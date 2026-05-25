@@ -296,14 +296,18 @@ class _Env(EnvBase):
         ).to(self.device)
 
 
-        for key, params in self.cfg.randomization.items():
-            rand = RAND_FUNCS[key](self, **params if params is not None else {})
-            self.randomizations[key] = rand
-            self._startup_callbacks.append(rand.startup)
-            self._reset_callbacks.append(rand.reset)
-            self._debug_draw_callbacks.append(rand.debug_draw)
-            self._pre_step_callbacks.append(rand.step)
-            self._update_callbacks.append(rand.update)
+        disable_randomization = bool(self.cfg.get("disable_randomization", False))
+        if disable_randomization:
+            print("[INFO] Randomization disabled by task config (disable_randomization=true).")
+        else:
+            for key, params in self.cfg.randomization.items():
+                rand = RAND_FUNCS[key](self, **params if params is not None else {})
+                self.randomizations[key] = rand
+                self._startup_callbacks.append(rand.startup)
+                self._reset_callbacks.append(rand.reset)
+                self._debug_draw_callbacks.append(rand.debug_draw)
+                self._pre_step_callbacks.append(rand.step)
+                self._update_callbacks.append(rand.update)
 
         for group_key, params in self.cfg.observation.items():
             max_delay = params.pop("_max_delay_", 0)
@@ -668,10 +672,11 @@ class _Env(EnvBase):
 
         try:
             self.viewer = viser.ViserServer(label="gmt")
+            viewer_envs = int(getattr(self.scene, "num_envs", self.num_envs))
             self._viser_scene = ViserMujocoScene.create(
                 server=self.viewer,
                 mj_model=self.sim.mj_model,
-                num_envs=self.num_envs,
+                num_envs=viewer_envs,
             )
             self._viser_scene.create_visualization_gui()
             self._viser_scene.debug_visualization_enabled = bool(debug_visualization_enabled)

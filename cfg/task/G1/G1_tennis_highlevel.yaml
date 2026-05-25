@@ -32,7 +32,7 @@ action:
     .*waist.*: 0.5
     .*ankle.*: 0.5
   alpha: [0.85, 1.0]
-  max_delay: 0
+  max_delay: 2
   delay_full_progress: 0.5
   boot_protect: false
   boot_delay_steps: 0
@@ -55,10 +55,12 @@ command:
       max_task_steps: 500
       max_consecutive_returns_before_finish: 8
       relaunch_on_success: true
-      launch_interval_s: 2.0
+      launch_interval_s_range: [1.0, 2.0]
       relaunch_require_recovery: true
       relaunch_recovery_hold_steps: 8
+      relaunch_recovery_hold_steps_range: [6, 10]
       relaunch_recovery_timeout_s: 2.5
+      relaunch_recovery_timeout_s_range: [2.2, 3.0]
     spawn:
       pos: [0.0, -10, 0.81]
       yaw: 1.5707963267948966
@@ -71,7 +73,7 @@ command:
       hitting_zone_xy_radius: 0.40
       hitting_zone_z_tol: 0.26
       hitting_zone_time_min: 0.05
-      hitting_zone_time_max: 0.65
+      hitting_zone_time_max: 0.90
     launch:
       bank:
         file: null
@@ -80,12 +82,20 @@ command:
         medium_file: null
         hard_file: null
         use_curriculum: true
-        curriculum_start_probs: [0.80, 0.15, 0.05]
-        curriculum_target_probs: [0.20, 0.35, 0.45]
-        curriculum_progress_up: 0.04
+        curriculum_start_probs: [0.55, 0.20, 0.25]
+        curriculum_target_probs: [0.08, 0.22, 0.70]
+        curriculum_progress_up: 0.006
         curriculum_progress_down: 0.06
         curriculum_ema_alpha: 0.05
         curriculum_min_level_prob: 0.05
+      replay:
+        enabled: true
+        capacity: 120000
+        min_size_to_sample: 2048
+        mix_prob_start: 0.0
+        mix_prob_end: 0.2
+        mix_progress_start: 0.05
+        mix_progress_end: 0.30
     court:
       net_height: 0.914
       x_limit: 4.2
@@ -95,6 +105,7 @@ command:
       net_clearance_reward_margin: 0.12
       miss_margin_y: 0.55
       out_margin_z: -0.25
+      out_max_z: 5.0
     recover:
       pre_hit_dead_ball_speed_thres: 1.0
       pre_hit_dead_ball_height_margin: 0.05
@@ -104,6 +115,10 @@ command:
       post_hit_dead_ball_height_margin: 0.05
       post_hit_dead_ball_patience_steps: 30
       post_hit_dead_ball_min_steps: 24
+      post_hit_vertical_stall_min_time_s: 0.10
+      post_hit_vertical_stall_min_z: 3.8
+      post_hit_vertical_stall_max_xy_speed: 0.9
+      post_hit_vertical_stall_min_vz: 0.2
 
 observation:
   policy:
@@ -140,10 +155,12 @@ reward:
     bounce_target: {weight: 30.0, sigma: [0.5, 1.0]}
     ball_target_progress: {weight: 12.0}
     net_progress: {weight: 10.0}
-    net_height_margin_dense: {weight: 8.0, net_window: 0.8, height_scale: 0.14, target_clearance_over_net: 0.20}
-    forward_velocity_soft: {weight: 5.5, vy_center: 1.0, vy_scale: 2.0, vz_center: 0.3, vz_scale: 1.2}
-    outgoing_angle_band: {weight: 7.0, target_angle_deg: 12.0, angle_sigma_deg: 6.0, min_forward_speed: 2.0}
-    predicted_bounce_target: {weight: 8.0, bounce_pos_scale: 0.2, bounce_time_scale: 0.35, max_bounce_time: 1.5, require_predicted_in: false}
+    net_height_margin_dense: {weight: 8.0, net_window: 0.8, height_scale: 0.10, target_clearance_over_net: 0.12}
+    forward_velocity_soft: {weight: 0.0, vy_center: 1.0, vy_scale: 2.0, vz_center: 0.12, vz_scale: 0.70}
+    outgoing_angle_band: {weight: 0.0, target_angle_deg: 8.0, angle_sigma_deg: 4.5, min_forward_speed: 2.0}
+    impact_guidance_prehit: {weight: 9.0, tf_min: 0.30, tf_max: 0.62, tf_samples: 9, max_outgoing_angle_deg: 13.0, net_clearance_target: 0.14, net_clearance_margin: 0.02, restitution_n: 0.58, speed_sigma: 1.2, w_speed: 0.015, w_angle: 12.0, w_clearance: 10.0, w_time: 0.02, w_out_risk: 0.60, edge_soft_m: 0.30, target_inset_x: 0.35, target_inset_y: 0.45, lateral_stance_offset: 0.30, root_align_max_xy: 0.70, racket_contact_max_xy: 0.95, gate_scale_xy: 0.12, n_align_weight: 0.7, v_track_weight: 0.3, activate_t_min: 0.10, activate_t_max: 0.55}
+    predicted_bounce_target: {weight: 8.0, bounce_pos_scale: 0.2, bounce_time_scale: 0.55, max_bounce_time: 1.5, require_predicted_in: true}
+    predicted_bounce_deep_center: {weight: 20.0, bounce_pos_scale: 0.28, bounce_time_scale: 0.45, max_bounce_time: 1.5, front_offset_m: 1.2, lateral_offset_x: 0.0, require_predicted_in: true}
     stroke_mode_racket_side_prehit: {weight: 0.1, side_margin: 0.03, side_scale: 0.06, max_bounce_t: 1.8}
     hit_success: {weight: 80.0}
     stroke_mode_match_on_hit: {weight: 80.0}
@@ -157,10 +174,11 @@ reward:
     post_hit_recover_zone_outer_enter: {weight: 18.0}
     post_hit_recover_zone_inner_enter: {weight: 28.0}
     success_streak_bonus: {weight: 45.0, streak_cap: 8, streak_power: 1.7}
-    hit_contact_height: {weight: 24.0, target_height: 1.22, sigma: 0.12, min_height: 1.00}
+    hit_contact_height: {weight: 24.0, target_height: 1.10, sigma: 0.10, min_height: 1.00}
     enter_hitting_zone: {weight: 18.0}
-    pass_net: {weight: 140.0}
+    pass_net: {weight: 100.0}
     bounce_in_event: {weight: 120.0}
+    bounce_deep_center: {weight: 90.0, sigma: [0.45, 0.90], front_offset_m: 1.2, lateral_offset_x: 0.0}
     bounce_wrong_side_penalty: {weight: -35.0}
     racket_speed_on_hit: {weight: 12.0}
     net_clearance: {weight: 100.0}
@@ -194,7 +212,38 @@ reward:
     episode_fail_racket_body_pre_hit: {weight: -80.0}
     episode_fail_racket_body_post_hit: {weight: -320.0}
 
-randomization: {}
+randomization:
+  perturb_body_materials:
+    body_names: ".*ankle_roll_link"
+    static_friction_range: [1.0, 2.5]
+    solref_time_constant_range: [0.02, 0.02]
+    solref_dampratio_range: [1.0, 1.0]
+    homogeneous: true
+  perturb_joint_friction:
+    .*: [0.75, 1.25]
+  motor_params_implicit:
+    stiffness_range:
+      .*: [1.0, 1.0]
+    damping_range:
+      .*: [1.0, 1.0]
+    armature_range:
+      .*: [1.0, 1.05]
+  perturb_body_mass:
+    .*: [0.75, 1.25]
+  perturb_body_com:
+    body_names: ".*"
+    com_range: [-0.05, 0.05]
+  perturb_racket_com:
+    body_name: "tennis_racket_mount"
+    com_range: [-0.1, 0.1]
+  perturb_racket_mass:
+    body_name: "tennis_racket_mount"
+    scale_range: [0.8, 1.2]
+  perturb_tennis_ball_dynamics:
+    ball_mass_scale_range: [0.95, 1.05]
+    ball_ground_restitution_range: [0.08, 0.18]
+    ball_ground_tangential_damping_range: [0.4, 0.7]
+    ball_air_drag_coef_range: [0.267, 1.069]
 
 termination:
   miss_ball_termination: {}

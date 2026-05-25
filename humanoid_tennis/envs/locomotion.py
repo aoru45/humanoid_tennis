@@ -167,8 +167,13 @@ class SimpleEnv(_Env):
                     pattern=".*_collision",
                     entity="robot",
                     # Monitor racket self-collision against robot body, excluding
-                    # the racket geom itself and the mounting hand collision geom.
-                    exclude=("tennis_racket_collision", "right_hand_collision"),
+                    # the racket geom itself, mounting hand, and left fake hand/wrist geoms.
+                    exclude=(
+                        "tennis_racket_collision",
+                        "right_hand_collision",
+                        "left_hand_collision",
+                        "left_wrist_collision",
+                    ),
                 ),
                 fields=("found",),
                 reduce="maxforce",

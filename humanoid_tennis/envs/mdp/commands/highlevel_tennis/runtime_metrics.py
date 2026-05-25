@@ -82,6 +82,18 @@ class HighLevelTennisRuntimeMetricsMixin:
             self.env.extra["highlevel/live_hit_mode_mismatch_ratio"] = 0.0
         self.env.extra["highlevel/live_ball_height_l_mean"] = float(ball_pos_l[:, 2].mean().item())
         self.env.extra["highlevel/live_ball_speed_mean"] = float(ball_speed.mean().item())
+        if getattr(self, "replay_launch_enabled", False):
+            cap = max(float(self.replay_launch_capacity), 1.0)
+            req = max(float(self.replay_sample_requested_last), 1.0)
+            self.env.extra["highlevel/replay_buffer_size"] = float(self.replay_launch_count)
+            self.env.extra["highlevel/replay_buffer_fill_ratio"] = float(float(self.replay_launch_count) / cap)
+            self.env.extra["highlevel/replay_mix_prob"] = float(self.replay_launch_mix_prob)
+            self.env.extra["highlevel/replay_added_total"] = float(int(self.replay_added_total))
+            self.env.extra["highlevel/replay_rejected_total"] = float(int(self.replay_rejected_total))
+            self.env.extra["highlevel/replay_sampled_total"] = float(int(self.replay_sampled_total))
+            self.env.extra["highlevel/replay_sampled_last_ratio"] = float(
+                float(self.replay_sampled_last_count) / req
+            )
         curriculum_state = self.launch_bank.get_curriculum_state()
         if len(curriculum_state) > 0:
             for k, v in curriculum_state.items():

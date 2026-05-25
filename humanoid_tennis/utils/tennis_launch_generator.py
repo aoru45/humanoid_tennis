@@ -125,6 +125,7 @@ class LaunchTrajectorySampler:
         self.aero_bounce_max_time = max(self.aero_bounce_max_time, self.launch_predict_dt)
 
         self.gravity_dir = torch.tensor([0.0, 0.0, -1.0], device=self.device, dtype=torch.float32)
+        self.last_sample_diagnostics: dict[str, object] | None = None
 
     def _tensor_range(self, values: tuple[float, float]) -> torch.Tensor:
         lo, hi = float(values[0]), float(values[1])
@@ -250,7 +251,7 @@ class LaunchTrajectorySampler:
 
         return bounce_xy, bounce_t, found
 
-    def _launch_quality_mask(
+    def _launch_quality_checks(
         self,
         launch_pos: torch.Tensor,
         vel: torch.Tensor,
@@ -258,20 +259,22 @@ class LaunchTrajectorySampler:
         pred_pos: torch.Tensor,
         net_cross_z: torch.Tensor,
         gravity_z: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         speed = vel.norm(dim=-1)
         horiz_speed = vel[:, :2].norm(dim=-1).clamp_min(1e-6)
         launch_angle_deg = torch.atan2(vel[:, 2], horiz_speed) * (180.0 / math.pi)
         forward_speed = -vel[:, 1]
 
-        valid = (speed >= self.launch_speed_range[0]) & (speed <= self.launch_speed_range[1])
-        valid &= pred_pos[:, 2] > (self.ball_radius + 0.02)
-        valid &= forward_speed >= self.launch_min_forward_speed
-        valid &= vel[:, 2] >= self.launch_min_vz
-        valid &= launch_angle_deg >= self.launch_angle_deg_range[0]
-        valid &= launch_angle_deg <= self.launch_angle_deg_range[1]
+        checks: dict[str, torch.Tensor] = {}
+        checks["speed_min"] = speed >= self.launch_speed_range[0]
+        checks["speed_max"] = speed <= self.launch_speed_range[1]
+        checks["strike_height"] = pred_pos[:, 2] > (self.ball_radius + 0.02)
+        checks["forward_speed_min"] = forward_speed >= self.launch_min_forward_speed
+        checks["vz_min"] = vel[:, 2] >= self.launch_min_vz
+        checks["angle_min"] = launch_angle_deg >= self.launch_angle_deg_range[0]
+        checks["angle_max"] = launch_angle_deg <= self.launch_angle_deg_range[1]
         if self.enforce_launch_net_clearance:
-            valid &= net_cross_z > (self.net_height + self.launch_net_clearance_margin)
+            checks["net_clearance"] = net_cross_z > (self.net_height + self.launch_net_clearance_margin)
         if self.enforce_launch_incoming_bounce_in:
             if self.enforce_aero_first_bounce_in:
                 bounce_xy, bounce_t, bounce_found = self._predict_first_bounce_aero(
@@ -280,7 +283,7 @@ class LaunchTrajectorySampler:
                     launch_ang=ang,
                     gravity_z=gravity_z,
                 )
-                valid &= bounce_found
+                checks["bounce_found"] = bounce_found
                 x_lo = self.incoming_bounce_x_range[0] - self.aero_bounce_range_relax_x
                 x_hi = self.incoming_bounce_x_range[1] + self.aero_bounce_range_relax_x
                 y_lo = self.incoming_bounce_y_range[0] - self.aero_bounce_range_relax_y
@@ -291,12 +294,77 @@ class LaunchTrajectorySampler:
                 x_hi = self.incoming_bounce_x_range[1]
                 y_lo = self.incoming_bounce_y_range[0]
                 y_hi = self.incoming_bounce_y_range[1]
-            valid &= bounce_t > 0.08
-            valid &= bounce_xy[:, 0] >= x_lo
-            valid &= bounce_xy[:, 0] <= x_hi
-            valid &= bounce_xy[:, 1] >= y_lo
-            valid &= bounce_xy[:, 1] <= y_hi
+            checks["bounce_time_min"] = bounce_t > 0.08
+            checks["bounce_x_min"] = bounce_xy[:, 0] >= x_lo
+            checks["bounce_x_max"] = bounce_xy[:, 0] <= x_hi
+            checks["bounce_y_min"] = bounce_xy[:, 1] >= y_lo
+            checks["bounce_y_max"] = bounce_xy[:, 1] <= y_hi
+
+        valid = torch.ones((vel.shape[0],), device=self.device, dtype=torch.bool)
+        for mask in checks.values():
+            valid &= mask
+        return valid, checks
+
+    def _launch_quality_mask(
+        self,
+        launch_pos: torch.Tensor,
+        vel: torch.Tensor,
+        ang: torch.Tensor,
+        pred_pos: torch.Tensor,
+        net_cross_z: torch.Tensor,
+        gravity_z: torch.Tensor,
+    ) -> torch.Tensor:
+        valid, _ = self._launch_quality_checks(
+            launch_pos=launch_pos,
+            vel=vel,
+            ang=ang,
+            pred_pos=pred_pos,
+            net_cross_z=net_cross_z,
+            gravity_z=gravity_z,
+        )
         return valid
+
+    def _accumulate_failure_counts(
+        self,
+        reason_counts: dict[str, int],
+        valid: torch.Tensor,
+        checks: dict[str, torch.Tensor],
+    ) -> None:
+        failed = ~valid
+        if not failed.any():
+            return
+        for name, mask in checks.items():
+            n_fail = int((failed & (~mask)).sum().item())
+            if n_fail <= 0:
+                continue
+            reason_counts[name] = reason_counts.get(name, 0) + n_fail
+
+    def _format_diag_reasons(self, reason_counts: dict[str, int], rejected: int, top_k: int = 8) -> str:
+        if rejected <= 0:
+            return "none"
+        if not reason_counts:
+            return "unknown"
+        items = sorted(reason_counts.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+        return ", ".join([f"{k}={v}/{rejected}({v / max(1, rejected):.1%})" for k, v in items])
+
+    def format_last_sample_diagnostics(self, top_k: int = 8) -> str:
+        diag = self.last_sample_diagnostics
+        if diag is None:
+            return "no diagnostics"
+        c1 = int(diag["primary_candidates"])
+        a1 = int(diag["primary_accepted"])
+        r1 = max(0, c1 - a1)
+        c2 = int(diag["extra_candidates"])
+        a2 = int(diag["extra_accepted"])
+        r2 = max(0, c2 - a2)
+        p = int(diag["pending_final"])
+        return (
+            f"primary attempts={diag['primary_attempts']}, accepted={a1}/{c1}; "
+            f"extra attempts={diag['extra_attempts']}, accepted={a2}/{c2}; "
+            f"pending={p}; "
+            f"primary_fail=[{self._format_diag_reasons(diag['primary_reasons'], r1, top_k=top_k)}]; "
+            f"extra_fail=[{self._format_diag_reasons(diag['extra_reasons'], r2, top_k=top_k)}]"
+        )
 
     def predict_first_bounce_ballistic(
         self,
@@ -401,7 +469,10 @@ class LaunchTrajectorySampler:
     def sample(
         self,
         num_samples: int,
+        *,
+        collect_diagnostics: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        self.last_sample_diagnostics = None
         num_samples = int(num_samples)
         if num_samples <= 0:
             empty = torch.zeros((0, 3), device=self.device, dtype=torch.float32)
@@ -413,12 +484,29 @@ class LaunchTrajectorySampler:
         launch_vel_all = torch.zeros((num_samples, 3), device=self.device, dtype=torch.float32)
         launch_ang_all = torch.zeros((num_samples, 3), device=self.device, dtype=torch.float32)
         target_all = torch.zeros((num_samples, 3), device=self.device, dtype=torch.float32)
+        diagnostics = None
+        if collect_diagnostics:
+            diagnostics = {
+                "requested": num_samples,
+                "primary_attempts": 0,
+                "extra_attempts": 0,
+                "primary_candidates": 0,
+                "extra_candidates": 0,
+                "primary_accepted": 0,
+                "extra_accepted": 0,
+                "primary_reasons": {},
+                "extra_reasons": {},
+                "pending_final": 0,
+            }
 
         pending = torch.arange(num_samples, device=self.device, dtype=torch.long)
         for _ in range(self.launch_resample_attempts):
             if pending.numel() == 0:
                 break
             n = pending.numel()
+            if diagnostics is not None:
+                diagnostics["primary_attempts"] += 1
+                diagnostics["primary_candidates"] += int(n)
             launch_pos = torch.zeros((n, 3), device=self.device, dtype=torch.float32)
             launch_pos[:, 0] = self._sample_uniform_n(n, self.launcher_x_range)
             launch_pos[:, 1] = self._sample_uniform_n(n, self.launcher_y_range)
@@ -454,8 +542,8 @@ class LaunchTrajectorySampler:
             ang = self._compute_launch_spin(vel, spin_rps)
             pred_pos, _, net_cross_z = self._predict_ball_at_time(launch_pos, vel, ang, flight_t, gravity_z[pending])
             strike_err = (pred_pos - strike_pos).norm(dim=-1)
-            valid = strike_err <= self.launch_strike_tolerance
-            valid &= self._launch_quality_mask(
+            checks: dict[str, torch.Tensor] = {"strike_tolerance": strike_err <= self.launch_strike_tolerance}
+            quality_valid, quality_checks = self._launch_quality_checks(
                 launch_pos=launch_pos,
                 vel=vel,
                 ang=ang,
@@ -463,6 +551,11 @@ class LaunchTrajectorySampler:
                 net_cross_z=net_cross_z,
                 gravity_z=gravity_z[pending],
             )
+            checks.update(quality_checks)
+            valid = checks["strike_tolerance"] & quality_valid
+            if diagnostics is not None:
+                diagnostics["primary_accepted"] += int(valid.sum().item())
+                self._accumulate_failure_counts(diagnostics["primary_reasons"], valid, checks)
 
             if valid.any():
                 accepted = pending[valid]
@@ -476,6 +569,9 @@ class LaunchTrajectorySampler:
             if pending.numel() == 0:
                 break
             n = pending.numel()
+            if diagnostics is not None:
+                diagnostics["extra_attempts"] += 1
+                diagnostics["extra_candidates"] += int(n)
             launch_pos = torch.zeros((n, 3), device=self.device, dtype=torch.float32)
             launch_pos[:, 0] = self._sample_uniform_n(n, self.launcher_x_range)
             launch_pos[:, 1] = self._sample_uniform_n(n, self.launcher_y_range)
@@ -527,8 +623,8 @@ class LaunchTrajectorySampler:
             )
             strike_err = (pred_pos - strike_pos).norm(dim=-1)
             relaxed_strike_tol = max(self.launch_strike_tolerance * 4.0, 0.9)
-            valid = strike_err <= relaxed_strike_tol
-            valid &= self._launch_quality_mask(
+            checks = {"strike_tolerance_relaxed": strike_err <= relaxed_strike_tol}
+            quality_valid, quality_checks = self._launch_quality_checks(
                 launch_pos=launch_pos,
                 vel=vel,
                 ang=ang,
@@ -536,6 +632,11 @@ class LaunchTrajectorySampler:
                 net_cross_z=net_cross_z,
                 gravity_z=gravity_z[pending],
             )
+            checks.update(quality_checks)
+            valid = checks["strike_tolerance_relaxed"] & quality_valid
+            if diagnostics is not None:
+                diagnostics["extra_accepted"] += int(valid.sum().item())
+                self._accumulate_failure_counts(diagnostics["extra_reasons"], valid, checks)
 
             if valid.any():
                 accepted = pending[valid]
@@ -545,11 +646,18 @@ class LaunchTrajectorySampler:
                 target_all[accepted] = target_pos[valid]
             pending = pending[~valid]
 
+        if diagnostics is not None:
+            diagnostics["pending_final"] = int(pending.numel())
+            self.last_sample_diagnostics = diagnostics
+
         if pending.numel() > 0:
+            diag_msg = ""
+            if diagnostics is not None:
+                diag_msg = f" | diagnostics: {self.format_last_sample_diagnostics(top_k=8)}"
             raise RuntimeError(
                 f"Failed to sample {int(pending.numel())} valid launches after "
                 f"{self.launch_resample_attempts + self.launch_extra_resample_attempts} attempts. "
-                "Try relaxing launch ranges or speed constraints."
+                f"Try relaxing launch ranges or speed constraints.{diag_msg}"
             )
 
         return launch_pos_all, launch_vel_all, launch_ang_all, target_all

@@ -7,6 +7,7 @@ task:
   student_train: false
 
 algo:
+  train_every: 32
   in_keys: [policy, pulse_policy, priv, priv_critic]
   symmetry_enabled: false
   init_noise_scale: 0.30

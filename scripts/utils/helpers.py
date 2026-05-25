@@ -10,6 +10,7 @@ import sys
 import importlib
 
 from typing import Sequence, Dict, Any, Tuple, List
+from pathlib import Path
 from tensordict import TensorDictBase, TensorDict
 from tensordict.nn import TensorDictModuleBase as ModBase
 from torchrl.envs.transforms import VecNorm
@@ -18,6 +19,7 @@ from termcolor import colored
 from collections import OrderedDict
 import imageio
 from omegaconf import OmegaConf, DictConfig
+from hydra.core.hydra_config import HydraConfig
 import humanoid_tennis.learning
 from humanoid_tennis.utils.wandb import parse_checkpoint_path
 import humanoid_tennis
@@ -55,6 +57,18 @@ def _install_legacy_checkpoint_aliases() -> None:
             sys.modules.setdefault(legacy_name, module)
 
     _LEGACY_CKPT_ALIAS_READY = True
+
+
+def _resolve_local_checkpoint_path(path: str | None) -> str | None:
+    if path is None or str(path).startswith("run:"):
+        return path
+    p = Path(str(path)).expanduser()
+    if p.is_absolute():
+        return str(p)
+    if HydraConfig.initialized():
+        cwd = HydraConfig.get().runtime.cwd
+        return str((Path(cwd) / p).resolve())
+    return str(p.resolve())
 
 class Every:
     def __init__(self, func, steps):
@@ -288,11 +302,17 @@ def make_env_policy(cfg: DictConfig, return_checkpoint_state: bool = False):
     elif "headless" in cfg:
         cfg.task.viewer.headless = cfg.headless
     aa.print("import SimpleEnv done")
-    base_env = SimpleEnv(cfg.task)
+    env_cls_path = str(cfg.task.get("env_class", "humanoid_tennis.envs.locomotion.SimpleEnv"))
+    if env_cls_path == "humanoid_tennis.envs.locomotion.SimpleEnv":
+        env_cls = SimpleEnv
+    else:
+        env_cls = hydra.utils.get_class(env_cls_path)
+    base_env = env_cls(cfg.task)
     aa.print("SimpleEnv done")
 
     if cfg.checkpoint_path is not None and aa.is_main_process():
         checkpoint_path = parse_checkpoint_path(cfg.checkpoint_path, cfg.get("wandb", None))
+        checkpoint_path = _resolve_local_checkpoint_path(checkpoint_path)
         aa.print(f"Loading checkpoint from {checkpoint_path}")
         _install_legacy_checkpoint_aliases()
         state_dict = torch.load(checkpoint_path, weights_only=False)
@@ -302,6 +322,7 @@ def make_env_policy(cfg: DictConfig, return_checkpoint_state: bool = False):
     teacher_checkpoint_path = cfg.algo.get("teacher_checkpoint_path", None)
     if teacher_checkpoint_path is not None and aa.is_main_process():
         teacher_checkpoint_path = parse_checkpoint_path(teacher_checkpoint_path, cfg.get("wandb", None))
+        teacher_checkpoint_path = _resolve_local_checkpoint_path(teacher_checkpoint_path)
         aa.print(f"Loading teacher checkpoint from {teacher_checkpoint_path}")
         _install_legacy_checkpoint_aliases()
         teacher_state_dict = torch.load(teacher_checkpoint_path, weights_only=False)

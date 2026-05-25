@@ -51,14 +51,27 @@ class LaunchBankConfig:
 
 
 @dataclass
+class LaunchReplayConfig:
+    enabled: bool = False
+    capacity: int = 120000
+    min_size_to_sample: int = 2048
+    mix_prob_start: float = 0.0
+    mix_prob_end: float = 0.5
+    mix_progress_start: float = 0.05
+    mix_progress_end: float = 0.30
+
+
+@dataclass
 class EpisodeConfig:
     max_task_steps: int = 1000
     max_consecutive_returns_before_finish: int = 8
     relaunch_on_success: bool = True
-    launch_interval_s: float = 2.0
+    launch_interval_s_range: tuple[float, float] = (2.0, 2.0)
     relaunch_require_recovery: bool = True
     relaunch_recovery_hold_steps: int = 8
+    relaunch_recovery_hold_steps_range: tuple[int, int] = (8, 8)
     relaunch_recovery_timeout_s: float = 2.5
+    relaunch_recovery_timeout_s_range: tuple[float, float] = (2.5, 2.5)
 
 
 @dataclass
@@ -83,6 +96,7 @@ class ApproachConfig:
 @dataclass
 class LaunchConfig:
     bank: LaunchBankConfig = field(default_factory=LaunchBankConfig)
+    replay: LaunchReplayConfig = field(default_factory=LaunchReplayConfig)
 
 
 @dataclass
@@ -95,6 +109,7 @@ class CourtConfig:
     net_clearance_reward_margin: float = 0.12
     miss_margin_y: float = 0.55
     out_margin_z: float = -0.25
+    out_max_z: float = 5.0
 
 
 @dataclass
@@ -107,6 +122,10 @@ class RecoverConfig:
     post_hit_dead_ball_height_margin: float = 0.05
     post_hit_dead_ball_patience_steps: int = 30
     post_hit_dead_ball_min_steps: int = 24
+    post_hit_vertical_stall_min_time_s: float = 0.10
+    post_hit_vertical_stall_min_z: float = 3.8
+    post_hit_vertical_stall_max_xy_speed: float = 0.9
+    post_hit_vertical_stall_min_vz: float = 0.2
 
 
 @dataclass
