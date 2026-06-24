@@ -1,5 +1,5 @@
 # Humanoid Tennis
-
+![img](ball.png)
 ## Introduction
 This project uses `mjlab` to train a Unitree G1 humanoid robot to play tennis. The Python package name is `humanoid_tennis`, and the repository contains the reinforcement learning pipeline, tennis task design, rollout utilities, and policy export scripts. The training curriculum is organized into three stages:
 1. **Stage 1 (Motion Tracking)**: The robot learns to robustly track diverse reference motions.
