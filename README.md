@@ -5,6 +5,8 @@ This project uses `mjlab` to train a Unitree G1 humanoid robot to play tennis. T
 1. **Stage 1 (Motion Tracking)**: The robot learns to robustly track diverse reference motions.
 2. **Pulse Stage**: A distillation/compression phase where the robot's capabilities are encoded into a latent "Pulse" representation.
 3. **High-Level Task**: The robot utilizes the learned latent space to solve the dynamic task of intercepting and hitting a tennis ball over the net.
+![img](run.gif)
+
 
 ## Installation
 This project uses `uv` for fast Python package management. To install all necessary dependencies, simply run:
