@@ -38,7 +38,13 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["humanoid_tennis", "humanoid_tennis.*"]
 
-# uv package index configuration; keeps PyPI as default fallback.
+# uv package index configuration.
+# Use China mirrors first for faster installs, while keeping official PyTorch/NVIDIA
+# indexes as fallbacks for packages that are not mirrored yet.
+[[tool.uv.index]]
+name = "pytorch-aliyun"
+url = "https://mirrors.aliyun.com/pytorch-wheels/cu128/"
+
 [[tool.uv.index]]
 name = "pytorch"
 url = "https://download.pytorch.org/whl/cu128"
@@ -48,6 +54,7 @@ name = "nvidia"
 url = "https://pypi.nvidia.com"
 
 [tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
 # mjlab==1.1.1 depends on a pre-release warp-lang.
 prerelease = "allow"
 # Allow resolving a package from later indexes when an earlier index has

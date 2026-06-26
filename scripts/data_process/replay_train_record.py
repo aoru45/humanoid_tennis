@@ -31,6 +31,39 @@ def _read_str(npz, key, default):
     return str(value)
 
 
+def _pad_robot_record_to_tennis_scene(
+    *,
+    qpos: np.ndarray,
+    qvel: np.ndarray,
+    scene_qpos_dim: int,
+    scene_qvel_dim: int,
+    env_origins: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    qpos_extra = int(scene_qpos_dim) - int(qpos.shape[-1])
+    qvel_extra = int(scene_qvel_dim) - int(qvel.shape[-1])
+    if qpos_extra == 0 and qvel_extra == 0:
+        return qpos, qvel, False
+    if qpos_extra != 7 or qvel_extra != 6:
+        raise ValueError(
+            f"Recorded qpos/qvel dim ({qpos.shape[-1]}/{qvel.shape[-1]}) does not match "
+            f"tennis scene dim ({scene_qpos_dim}/{scene_qvel_dim}), and cannot be padded "
+            f"as a single free-joint tennis ball."
+        )
+
+    steps, num_env_slots = qpos.shape[:2]
+    ball_qpos = np.zeros((steps, num_env_slots, 7), dtype=qpos.dtype)
+    ball_qvel = np.zeros((steps, num_env_slots, 6), dtype=qvel.dtype)
+    if env_origins is not None and env_origins.shape[0] == num_env_slots:
+        ball_qpos[..., :3] = env_origins[None, :, :3].astype(qpos.dtype, copy=False)
+        ball_qpos[..., 0] += 0.6
+        ball_qpos[..., 2] += 1.0
+    else:
+        ball_qpos[..., 0] = 0.6
+        ball_qpos[..., 2] = 1.0
+    ball_qpos[..., 3] = 1.0
+    return np.concatenate([qpos, ball_qpos], axis=-1), np.concatenate([qvel, ball_qvel], axis=-1), True
+
+
 def _find_latest_train_record(project_root: Path) -> Path:
     outputs_dir = project_root / "outputs"
     if not outputs_dir.exists():
@@ -496,7 +529,7 @@ def main():
         "--racket-center-offset",
         type=float,
         nargs=3,
-        default=(0.1025, -0.004, 0.4),
+        default=(0.1035, -0.00325, 0.46277),
         metavar=("OX", "OY", "OZ"),
         help="Local XYZ offset from racket body origin to reward racket center.",
     )
@@ -647,6 +680,18 @@ def main():
     )
     robot_nq = int(sim.data.qpos.shape[-1]) - 7
     robot_nv = int(sim.data.qvel.shape[-1]) - 6
+    qpos, qvel, padded_tennis_ball = _pad_robot_record_to_tennis_scene(
+        qpos=qpos,
+        qvel=qvel,
+        scene_qpos_dim=int(sim.data.qpos.shape[-1]),
+        scene_qvel_dim=int(sim.data.qvel.shape[-1]),
+        env_origins=env_origins_full,
+    )
+    if padded_tennis_ball:
+        print(
+            "[INFO] Record contains robot-only qpos/qvel; padded a stationary tennis ball "
+            "so it can be replayed in the tennis scene."
+        )
     if qpos.shape[-1] != int(sim.data.qpos.shape[-1]) or qvel.shape[-1] != int(sim.data.qvel.shape[-1]):
         raise ValueError(
             f"Recorded qpos/qvel dim ({qpos.shape[-1]}/{qvel.shape[-1]}) does not match "

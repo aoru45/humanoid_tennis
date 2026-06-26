@@ -204,5 +204,6 @@ sim2sim/real_g1/*.npy
 motion.npy
 dataset
 data/*
+tennis_launch_bank/
 *.pdf
 AGENTS.md

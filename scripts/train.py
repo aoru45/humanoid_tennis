@@ -13,6 +13,16 @@ import datetime
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+warp_cache_base = os.environ.get("WARP_CACHE_PATH")
+local_rank = os.environ.get("LOCAL_RANK")
+if warp_cache_base and local_rank is not None and os.environ.get("WARP_PER_RANK_CACHE", "1") != "0":
+    os.environ["WARP_CACHE_PATH"] = os.path.join(warp_cache_base, f"rank_{local_rank}")
+
+if os.environ.get("WARP_DISABLE_PCH", "1") != "0":
+    import warp as _warp
+    _warp.config.use_precompiled_headers = False
+    _warp.config.load_module_max_workers = 0
+
 from omegaconf import OmegaConf, DictConfig
 from collections import OrderedDict
 from tqdm import tqdm
