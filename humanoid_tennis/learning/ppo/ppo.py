@@ -171,6 +171,7 @@ class PPOConfig:
 
     command_modes: Union[List[int], None] = None
     checkpoint_path: Union[str, None] = None
+    load_highlevel_pulse_only: bool = False
 
 
 cs = ConfigStore.instance()

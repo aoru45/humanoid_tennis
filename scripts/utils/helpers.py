@@ -416,6 +416,7 @@ def make_env_policy(cfg: DictConfig, return_checkpoint_state: bool = False):
         policy_state = state_dict["policy"]
         ckpt_phase = policy_state.get("last_phase", None) if isinstance(policy_state, dict) else None
         is_highlevel = str(getattr(cfg.algo, "phase", "")).lower() == "highlevel"
+        load_highlevel_pulse_only = bool(getattr(cfg.algo, "load_highlevel_pulse_only", False))
         rollout_mode = str(cfg.get("rollout_mode", "")).lower()
         if (
             rollout_mode == "pulse_random"
@@ -429,6 +430,19 @@ def make_env_policy(cfg: DictConfig, return_checkpoint_state: bool = False):
                 )
             )
             policy.load_pulse_modules_state_dict(policy_state)
+        elif (
+            is_highlevel
+            and load_highlevel_pulse_only
+            and hasattr(policy, "load_highlevel_from_pulse_state_dict")
+        ):
+            print(
+                colored(
+                    f"[Info]: High-level phase + load_highlevel_pulse_only=true. "
+                    f"Load pulse modules only (prior/decoder) from checkpoint phase '{ckpt_phase}'.",
+                    "green",
+                )
+            )
+            policy.load_highlevel_from_pulse_state_dict(policy_state)
         elif (
             is_highlevel
             and str(ckpt_phase).lower() == "pulse"

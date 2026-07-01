@@ -8,7 +8,8 @@ RUN_NAME_SLUG="$(printf '%s' "${RUN_NAME}" | tr '[:space:]/' '__' | tr -cd '[:al
 NPROC="${NPROC:-4}"
 NUM_ENVS="${NUM_ENVS:-4096}"
 ROBOT_NAME="${ROBOT_NAME:-g1_col_full_self_racket_noself}"
-HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-./outputs/\${now:%Y-%m-%d}/\${now:%H-%M-%S}-${RUN_NAME_SLUG}}"
+DEFAULT_HYDRA_RUN_DIR="./outputs/\${now:%Y-%m-%d}/\${now:%H-%M-%S}-${RUN_NAME_SLUG}"
+HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-$DEFAULT_HYDRA_RUN_DIR}"
 
 uv run torchrun --nproc_per_node="${NPROC}" scripts/train.py \
   task=G1/G1_tracking "+exp=train" \

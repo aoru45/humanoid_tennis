@@ -8,7 +8,7 @@ NUM_ENVS="${NUM_ENVS:-4096}"
 WANDB_ENTITY="${WANDB_ENTITY:-aoru45}"
 WANDB_PROJECT="${WANDB_PROJECT:-gentle_humanoid}"
 RUN_NAME="${RUN_NAME:-tracking-stage3-finetune-tennis-$(date +%m%d-%H%M)}"
-USE_RACKET="${USE_RACKET:-0}"
+USE_RACKET="${USE_RACKET:-1}"
 ROBOT_NAME="${ROBOT_NAME:-}"
 
 USE_RACKET_NORM="$(printf '%s' "${USE_RACKET}" | tr '[:upper:]' '[:lower:]')"

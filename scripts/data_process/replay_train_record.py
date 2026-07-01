@@ -496,7 +496,7 @@ def main():
         "--racket-center-offset",
         type=float,
         nargs=3,
-        default=(0.1025, -0.004, 0.4),
+        default=(0.1035, -0.00325, 0.46277),
         metavar=("OX", "OY", "OZ"),
         help="Local XYZ offset from racket body origin to reward racket center.",
     )

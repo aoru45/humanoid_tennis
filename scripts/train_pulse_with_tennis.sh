@@ -21,7 +21,7 @@ USE_RACKET_NORM="$(printf '%s' "${USE_RACKET}" | tr '[:upper:]' '[:lower:]')"
 if [[ -z "${ROBOT_NAME}" ]]; then
   case "${USE_RACKET_NORM}" in
     1|true|yes|y|on)
-      ROBOT_NAME="g1_col_full_self_racket_noself"
+      ROBOT_NAME="g1_col_full_self_racket"
       ;;
     0|false|no|n|off|"")
       ROBOT_NAME="g1_col_full_self"

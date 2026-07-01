@@ -9,7 +9,8 @@ NPROC="${NPROC:-4}"
 NUM_ENVS="${NUM_ENVS:-4096}"
 ROBOT_NAME="${ROBOT_NAME:-g1_col_full_self_racket_noself}"
 STAGE2_CKPT="${STAGE2_CKPT:-/mnt/data/xueaoru/motion_tracking/outputs/track_seed/checkpoint_final.pt}"
-HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-./outputs/\${now:%Y-%m-%d}/\${now:%H-%M-%S}-${RUN_NAME_SLUG}}"
+DEFAULT_HYDRA_RUN_DIR="./outputs/\${now:%Y-%m-%d}/\${now:%H-%M-%S}-${RUN_NAME_SLUG}"
+HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-$DEFAULT_HYDRA_RUN_DIR}"
 
 if [[ "${STAGE2_CKPT}" != run:* ]] && [[ ! -f "${STAGE2_CKPT}" ]]; then
   echo "[ERROR] Stage2 checkpoint not found: ${STAGE2_CKPT}"
