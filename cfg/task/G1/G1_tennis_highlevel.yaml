@@ -209,6 +209,7 @@ reward:
     episode_fail_net: {weight: -50.0}
     episode_fail_out: {weight: -50.0}
     episode_stroke_style_violation: {weight: -50.0}
+    episode_fail_second_bounce: {weight: -260.0}
     episode_fail_racket_body_pre_hit: {weight: -80.0}
     episode_fail_racket_body_post_hit: {weight: -320.0}
 
@@ -251,6 +252,7 @@ termination:
   ball_out_of_bounds_termination: {}
   stroke_style_violation_termination: {}
   racket_body_contact_termination: {}
+  second_bounce_termination: {}
   fall_over: {xy_thres: 0.90, z_thres: 0.40}
 
 sim:

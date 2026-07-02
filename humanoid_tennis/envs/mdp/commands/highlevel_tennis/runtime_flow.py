@@ -35,6 +35,18 @@ class HighLevelTennisRuntimeFlowMixin:
         env_origins = self.env.scene.env_origins
         ball_pos_l = ball_pos_w - env_origins
         self._update_contact_events()
+        bounce_contact_mask = self.ball_court_contact_event | (
+            self.ball_court_contact & (ball_vel_w[:, 2] > 0.0) & (~self.pre_hit_ball_court_contact_latched)
+        )
+        pre_hit_bounce = bounce_contact_mask & (~self.has_hit) & (~self.finished)
+        if pre_hit_bounce.any():
+            self.pre_hit_bounce_count[pre_hit_bounce] += 1
+            self.pre_hit_bounce_event[pre_hit_bounce] = True
+            second_bounce = pre_hit_bounce & (self.pre_hit_bounce_count >= 2)
+            if second_bounce.any():
+                self.pre_hit_second_bounce_event[second_bounce] = True
+                self.fail_second_bounce[second_bounce] = True
+        self.pre_hit_ball_court_contact_latched[:] = self.ball_court_contact
 
         racket_pos_w, racket_vel_w = self._racket_state_w()
         racket_acc = (racket_vel_w - self._prev_racket_vel_w) / float(self.env.physics_dt)
@@ -43,6 +55,7 @@ class HighLevelTennisRuntimeFlowMixin:
 
         hit_gate = (
             (~self.has_hit)
+            & (~self.fail_second_bounce)
             & (~self.fail_miss)
             & (~self.fail_net)
             & (~self.fail_out)
@@ -125,10 +138,10 @@ class HighLevelTennisRuntimeFlowMixin:
                     self.replay_pending_ang_w[outgoing_mask] = ball_ang_w[outgoing_mask]
                 self.replay_pending_capture_age_substeps[track_mask] += 1
 
-        bounce_contact_mask = self.ball_court_contact_event | (
+        post_hit_bounce_contact_mask = self.ball_court_contact_event | (
             self.ball_court_contact & (ball_vel_w[:, 2] > 0.0)
         )
-        first_bounce = bounce_contact_mask & self.has_hit & (~self.has_bounce)
+        first_bounce = post_hit_bounce_contact_mask & self.has_hit & (~self.has_bounce)
         if first_bounce.any():
             self.has_bounce[first_bounce] = True
             self.bounce_event[first_bounce] = True
@@ -214,6 +227,7 @@ class HighLevelTennisRuntimeFlowMixin:
         zone_z_err = (racket_pos_w[:, 2] - contact_pos_w[:, 2]).abs()
         zone_now = (
             (~self.has_hit)
+            & (~self.fail_second_bounce)
             & (~self.fail_miss)
             & (~self.fail_net)
             & (~self.fail_out)
@@ -395,6 +409,7 @@ class HighLevelTennisRuntimeFlowMixin:
             | self.fail_out
             | self.fail_style
             | self.fail_racket_body
+            | self.fail_second_bounce
         )
         # Rally failure event should be counted once (before finished flips to True).
         new_fail_event = (~self.finished) & (~success_done) & (fail_any | timeout)
@@ -433,6 +448,8 @@ class HighLevelTennisRuntimeFlowMixin:
         self.hit_event[:] = False
         self.success_event[:] = False
         self.bounce_event[:] = False
+        self.pre_hit_bounce_event[:] = False
+        self.pre_hit_second_bounce_event[:] = False
         self.pass_net_event[:] = False
         self.net_clearance_event[:] = False
         self.recover_zone_outer_enter_event[:] = False

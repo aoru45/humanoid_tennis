@@ -295,6 +295,193 @@ def _compute_racket_face_dirs_w(
     return center_pos_w, face_plus_dir_w, face_minus_dir_w
 
 
+def _predict_receive_contact_target_w(
+    *,
+    ball_pos_w: torch.Tensor,
+    ball_vel_w: torch.Tensor,
+    gravity_z: float,
+    ball_radius: float,
+    contact_lead_time: float,
+    contact_min_t: float,
+    contact_max_t: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    g = torch.full((ball_pos_w.shape[0],), float(gravity_z), device=ball_pos_w.device, dtype=ball_pos_w.dtype)
+    g = torch.where(g.abs() > 1.0e-6, g, torch.full_like(g, -9.81))
+    z0 = ball_pos_w[:, 2]
+    vz = ball_vel_w[:, 2]
+    disc = (vz.square() - 2.0 * g * (z0 - float(ball_radius))).clamp_min(1.0e-6)
+    sqrt_disc = torch.sqrt(disc)
+    t1 = (-vz - sqrt_disc) / g
+    t2 = (-vz + sqrt_disc) / g
+    bounce_t = torch.where(t1 > 1.0e-4, t1, t2).clamp_min(1.0e-4)
+    contact_t = (bounce_t - float(contact_lead_time)).clamp(float(contact_min_t), float(contact_max_t))
+    contact_xy = ball_pos_w[:, :2] + ball_vel_w[:, :2] * contact_t.unsqueeze(-1)
+    contact_z = (
+        ball_pos_w[:, 2]
+        + ball_vel_w[:, 2] * contact_t
+        + 0.5 * g * contact_t.square()
+    ).clamp_min(float(ball_radius) + 0.02)
+    contact_pos_w = torch.cat([contact_xy, contact_z.unsqueeze(-1)], dim=-1)
+    return contact_pos_w, contact_t, bounce_t
+
+
+def _compute_receive_root_target_xy(
+    *,
+    contact_pos_w: torch.Tensor,
+    root_pos_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
+    racket_center_w: torch.Tensor,
+    lateral_stance_offset: float,
+) -> torch.Tensor:
+    offset = float(lateral_stance_offset)
+    if abs(offset) <= 1.0e-6:
+        return contact_pos_w[:, :2]
+
+    side_vec_xy = racket_center_w[:, :2] - root_pos_w[:, :2]
+    side_norm = side_vec_xy.norm(dim=-1, keepdim=True)
+    side_dir_xy = side_vec_xy / side_norm.clamp_min(1.0e-6)
+    left_dir_b = torch.tensor([0.0, 1.0, 0.0], device=root_pos_w.device, dtype=root_pos_w.dtype).expand_as(root_pos_w)
+    left_dir_w = quat_apply(root_quat_w, left_dir_b)
+    left_dir_xy = left_dir_w[:, :2] / left_dir_w[:, :2].norm(dim=-1, keepdim=True).clamp_min(1.0e-6)
+    side_dir_xy = torch.where(side_norm > 1.0e-4, side_dir_xy, left_dir_xy)
+    return contact_pos_w[:, :2] - offset * side_dir_xy
+
+
+def _draw_ground_ring(
+    viser_scene,
+    *,
+    center_w: torch.Tensor,
+    radius: float,
+    z: float,
+    color: tuple[float, float, float, float],
+    width: float = 0.006,
+    num_segments: int = 48,
+) -> None:
+    angles = np.linspace(0.0, 2.0 * np.pi, int(num_segments) + 1, dtype=np.float32)
+    for i in range(int(num_segments)):
+        a0 = float(angles[i])
+        a1 = float(angles[i + 1])
+        p0 = center_w.clone()
+        p1 = center_w.clone()
+        p0[0] += float(radius) * np.cos(a0)
+        p0[1] += float(radius) * np.sin(a0)
+        p1[0] += float(radius) * np.cos(a1)
+        p1[1] += float(radius) * np.sin(a1)
+        p0[2] = float(z)
+        p1[2] = float(z)
+        viser_scene.add_cylinder(p0, p1, radius=float(width), color=color)
+
+
+def _draw_receive_target_debug(
+    *,
+    viser_scene,
+    robot,
+    tennis_ball,
+    racket_center_w: torch.Tensor,
+    gravity_z: float,
+    ball_radius: float,
+    contact_lead_time: float,
+    contact_min_t: float,
+    contact_max_t: float,
+    max_bounce_t: float,
+    rear_margin_y: float,
+    lateral_stance_offset: float,
+    contact_radius: float,
+    root_radius: float,
+    incoming_only: bool,
+    pre_hit_bounce_count: int = 0,
+) -> bool:
+    root_pos_w = robot.data.root_link_pos_w
+    root_quat_w = robot.data.root_link_quat_w
+    ball_pos_w = tennis_ball.data.root_link_pos_w
+    ball_vel_w = tennis_ball.data.root_link_lin_vel_w
+    contact_pos_w, contact_t, _ = _predict_receive_contact_target_w(
+        ball_pos_w=ball_pos_w,
+        ball_vel_w=ball_vel_w,
+        gravity_z=gravity_z,
+        ball_radius=ball_radius,
+        contact_lead_time=contact_lead_time,
+        contact_min_t=contact_min_t,
+        contact_max_t=contact_max_t,
+    )
+    if int(pre_hit_bounce_count) > 0:
+        contact_t = torch.full_like(contact_t, float(contact_min_t))
+        contact_xy = ball_pos_w[:, :2] + ball_vel_w[:, :2] * contact_t.unsqueeze(-1)
+        g = torch.full((ball_pos_w.shape[0],), float(gravity_z), device=ball_pos_w.device, dtype=ball_pos_w.dtype)
+        contact_z = (
+            ball_pos_w[:, 2]
+            + ball_vel_w[:, 2] * contact_t
+            + 0.5 * g * contact_t.square()
+        ).clamp_min(float(ball_radius) + 0.02)
+        contact_pos_w = torch.cat([contact_xy, contact_z.unsqueeze(-1)], dim=-1)
+    root_target_xy = _compute_receive_root_target_xy(
+        contact_pos_w=contact_pos_w,
+        root_pos_w=root_pos_w,
+        root_quat_w=root_quat_w,
+        racket_center_w=racket_center_w,
+        lateral_stance_offset=lateral_stance_offset,
+    )
+    active = (int(pre_hit_bounce_count) < 2) & (contact_t <= float(max_bounce_t)) & (ball_pos_w[:, 1] > (root_pos_w[:, 1] - float(rear_margin_y)))
+    if incoming_only:
+        active = active & (ball_vel_w[:, 1] < 0.0)
+    if not bool(active[0].item()):
+        return False
+
+    contact_pos = contact_pos_w[0]
+    contact_ground = contact_pos.clone()
+    contact_ground[2] = max(float(ball_radius) + 0.01, 0.045)
+    root_target = torch.cat(
+        [
+            root_target_xy[0],
+            torch.tensor([0.10], device=root_target_xy.device, dtype=root_target_xy.dtype),
+        ]
+    )
+    root_ground = root_pos_w[0].clone()
+    root_ground[2] = 0.10
+
+    viser_scene.add_sphere(contact_pos, radius=0.060, color=(0.05, 0.95, 1.0, 0.95))
+    viser_scene.add_cylinder(contact_ground, contact_pos, radius=0.004, color=(0.05, 0.95, 1.0, 0.70))
+    _draw_ground_ring(
+        viser_scene,
+        center_w=contact_ground,
+        radius=float(contact_radius),
+        z=float(contact_ground[2].item()),
+        color=(0.05, 0.95, 1.0, 0.85),
+    )
+    viser_scene.add_sphere(root_target, radius=0.075, color=(1.0, 0.15, 1.0, 0.95))
+    _draw_ground_ring(
+        viser_scene,
+        center_w=root_target,
+        radius=float(root_radius),
+        z=float(root_target[2].item()),
+        color=(1.0, 0.15, 1.0, 0.80),
+        width=0.005,
+    )
+    viser_scene.add_cylinder(root_ground, root_target, radius=0.004, color=(1.0, 0.15, 1.0, 0.65))
+    viser_scene.add_cylinder(root_target, contact_ground, radius=0.003, color=(0.65, 0.45, 1.0, 0.65))
+    return True
+
+
+def _pre_hit_bounce_count_at_frame(
+    *,
+    qpos_slot: np.ndarray,
+    qvel_slot: np.ndarray,
+    robot_nq: int,
+    robot_nv: int,
+    frame_idx: int,
+    ball_radius: float,
+) -> int:
+    frame_idx = int(np.clip(frame_idx, 0, int(qpos_slot.shape[0]) - 1))
+    ball_pos = qpos_slot[: frame_idx + 1, 0, robot_nq : robot_nq + 3]
+    ball_vel = qvel_slot[: frame_idx + 1, 0, robot_nv : robot_nv + 3]
+    if ball_pos.shape[0] == 0:
+        return 0
+    contact = ball_pos[:, 2] <= float(ball_radius) + 0.012
+    rising = ball_vel[:, 2] > 0.0
+    event = contact & rising & np.concatenate((np.ones((1,), dtype=bool), ~contact[:-1]))
+    return int(event.sum())
+
+
 
 
 def _find_launch_events(
@@ -527,6 +714,28 @@ def main():
         metavar=("RX", "RY", "RZ"),
         help="Noise-free recovery target offset in local env frame (added to env origin).",
     )
+    parser.add_argument(
+        "--show-receive-target",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Initial GUI state for predicted receive/contact target overlay.",
+    )
+    parser.add_argument(
+        "--receive-target-incoming-only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Only draw receive target while the ball is moving toward the robot (vy < 0).",
+    )
+    parser.add_argument("--receive-contact-lead-time", type=float, default=0.16)
+    parser.add_argument("--receive-contact-min-t", type=float, default=0.06)
+    parser.add_argument("--receive-contact-max-t", type=float, default=1.20)
+    parser.add_argument("--receive-max-bounce-t", type=float, default=1.80)
+    parser.add_argument("--receive-rear-margin-y", type=float, default=0.80)
+    parser.add_argument("--receive-lateral-stance-offset", type=float, default=0.30)
+    parser.add_argument("--receive-contact-radius", type=float, default=0.40)
+    parser.add_argument("--receive-root-radius", type=float, default=0.60)
+    parser.add_argument("--receive-ball-radius", type=float, default=0.0335)
+    parser.add_argument("--receive-gravity-z", type=float, default=-9.81)
     args = parser.parse_args()
     argv = set(sys.argv[1:])
 
@@ -714,6 +923,11 @@ def main():
         initial_value=True,
         hint="Draw the return target (first-frame root position for this env slot).",
     )
+    receive_target_debug_checkbox = viewer.gui.add_checkbox(
+        "Show Receive Target",
+        initial_value=bool(args.show_receive_target),
+        hint="Draw predicted ball contact point (cyan) and root stance target (magenta).",
+    )
 
     state: dict[str, object] = {
         "slot": -1,
@@ -851,7 +1065,7 @@ def main():
     )
     print(f"[INFO] Base playback frame range: [{base_start_step}, {base_end_step}) ({base_end_step - base_start_step} frames).")
     print("[INFO] Change `Env Slot` in GUI to switch replay target without restarting.")
-    print("[INFO] Toggle `Show Racket Center Debug` / `Show Recovery Target` in GUI.")
+    print("[INFO] Toggle `Show Racket Center Debug` / `Show Recovery Target` / `Show Receive Target` in GUI.")
     print("Press Ctrl+C to exit.")
 
     frame_dt = float(step_dt) / float(args.speed)
@@ -885,7 +1099,8 @@ def main():
 
                 show_racket_debug = bool(racket_center_debug_checkbox.value)
                 show_recovery_target_debug = bool(recovery_target_debug_checkbox.value)
-                show_any_debug = show_racket_debug or show_recovery_target_debug
+                show_receive_target_debug = bool(receive_target_debug_checkbox.value)
+                show_any_debug = show_racket_debug or show_recovery_target_debug or show_receive_target_debug
                 if show_any_debug:
                     if not viser_scene.debug_visualization_enabled:
                         viser_scene.debug_visualization_enabled = True
@@ -934,6 +1149,33 @@ def main():
                     face_len = float(racket_face_length)
                     face_plus_end_w = racket_center_w + face_plus_dir_w * face_len
                     face_minus_end_w = racket_center_w + face_minus_dir_w * face_len
+                    if show_receive_target_debug:
+                        pre_hit_bounce_count = _pre_hit_bounce_count_at_frame(
+                            qpos_slot=state["qpos_slot"],
+                            qvel_slot=state["qvel_slot"],
+                            robot_nq=robot_nq,
+                            robot_nv=robot_nv,
+                            frame_idx=frame_idx,
+                            ball_radius=float(args.receive_ball_radius),
+                        )
+                        _draw_receive_target_debug(
+                            viser_scene=viser_scene,
+                            robot=robot,
+                            tennis_ball=scene["tennis_ball"],
+                            racket_center_w=racket_center_w,
+                            gravity_z=float(args.receive_gravity_z),
+                            ball_radius=float(args.receive_ball_radius),
+                            contact_lead_time=float(args.receive_contact_lead_time),
+                            contact_min_t=float(args.receive_contact_min_t),
+                            contact_max_t=float(args.receive_contact_max_t),
+                            max_bounce_t=float(args.receive_max_bounce_t),
+                            rear_margin_y=float(args.receive_rear_margin_y),
+                            lateral_stance_offset=float(args.receive_lateral_stance_offset),
+                            contact_radius=max(float(args.receive_contact_radius), 1.0e-3),
+                            root_radius=max(float(args.receive_root_radius), 1.0e-3),
+                            incoming_only=bool(args.receive_target_incoming_only),
+                            pre_hit_bounce_count=pre_hit_bounce_count,
+                        )
                     if show_racket_debug:
                         viser_scene.add_sphere(
                             racket_mount_w[0],

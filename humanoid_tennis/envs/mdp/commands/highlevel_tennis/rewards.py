@@ -66,7 +66,7 @@ class HighLevelTennisRewardMixin:
         ball_vel_w: torch.Tensor,
         gravity_z: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Predict pre-hit contact target; prefer lead-time before bounce, fallback to fixed-height crossing."""
+        """Predict legal pre-hit contact target without chasing a second bounce."""
         target_bounce_xy, pred_bounce_t = self._incoming_bounce_target_xy(
             ball_pos_w, ball_vel_w, gravity_z=gravity_z
         )
@@ -120,8 +120,17 @@ class HighLevelTennisRewardMixin:
             fixed_t,
             torch.full_like(lead_t, float(self.approach_contact_max_t)),
         )
-        contact_t = torch.where(lead_valid, lead_t, fallback_t)
-        contact_valid = lead_valid | fixed_valid
+        pre_first_bounce_t = torch.where(lead_valid, lead_t, fallback_t)
+
+        post_first_bounce = (self.pre_hit_bounce_count > 0) & (~self.has_hit)
+        immediate_t = torch.full_like(lead_t, float(self.approach_contact_min_t))
+        post_first_bounce_t = torch.where(fixed_valid, fixed_t, immediate_t)
+        contact_t = torch.where(post_first_bounce, post_first_bounce_t, pre_first_bounce_t)
+        contact_valid = torch.where(
+            post_first_bounce,
+            torch.isfinite(pred_bounce_t) & (pred_bounce_t > 1.0e-4),
+            lead_valid | fixed_valid,
+        )
 
         contact_xy = ball_pos_w[:, :2] + ball_vel_w[:, :2] * contact_t.unsqueeze(-1)
 
@@ -490,6 +499,7 @@ class HighLevelTennisRewardMixin:
 
         active = (
             (~self.has_hit)
+            & (~self.fail_second_bounce)
             & (~self.fail_miss)
             & (~self.fail_net)
             & (~self.fail_out)
@@ -531,6 +541,7 @@ class HighLevelTennisRewardMixin:
 
         active = (
             (~self.has_hit)
+            & (~self.fail_second_bounce)
             & (~self.fail_miss)
             & (~self.fail_net)
             & (~self.fail_out)
@@ -577,6 +588,7 @@ class HighLevelTennisRewardMixin:
 
         active = (
             (~self.has_hit)
+            & (~self.fail_second_bounce)
             & (~self.fail_miss)
             & (~self.fail_net)
             & (~self.fail_out)
@@ -620,7 +632,12 @@ class HighLevelTennisRewardMixin:
         height_gate = torch.exp(-0.5 * (dz / h_sigma).square())
         alignment = alignment_xy * height_gate
         
-        active = ((~self.has_hit) & contact_valid & (contact_t <= float(activate_contact_t))).float().unsqueeze(-1)
+        active = (
+            (~self.has_hit)
+            & (~self.fail_second_bounce)
+            & contact_valid
+            & (contact_t <= float(activate_contact_t))
+        ).float().unsqueeze(-1)
         return proximity * alignment * active
 
     @reward
@@ -653,6 +670,7 @@ class HighLevelTennisRewardMixin:
 
         active = (
             (~self.has_hit)
+            & (~self.fail_second_bounce)
             & (~self.fail_miss)
             & (~self.fail_net)
             & (~self.fail_out)
@@ -1069,6 +1087,7 @@ class HighLevelTennisRewardMixin:
 
         active = (
             (~self.has_hit)
+            & (~self.fail_second_bounce)
             & (~self.fail_miss)
             & (~self.fail_net)
             & (~self.fail_out)
@@ -1365,6 +1384,10 @@ class HighLevelTennisRewardMixin:
     @reward
     def episode_fail_racket_body_post_hit(self):
         return (self.finished & self.fail_racket_body & self.has_hit).float().unsqueeze(-1)
+
+    @reward
+    def episode_fail_second_bounce(self):
+        return (self.finished & self.fail_second_bounce).float().unsqueeze(-1)
 
     @reward
     def recover_timeout_penalty(self):
